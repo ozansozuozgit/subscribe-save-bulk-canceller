@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "Subscribe & Save — Bulk Canceller",
+  "version": "2.0.0",
+  "description": "Review every Amazon Subscribe & Save subscription with images and titles, then bulk-cancel the ones you don't want — with a live progress panel and safe per-item failure handling.",
+  "icons": {
+    "16": "icons/16.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "action": {
+    "default_title": "Subscribe & Save Bulk Canceller",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/16.png",
+      "48": "icons/48.png",
+      "128": "icons/128.png"
+    }
+  },
+  "permissions": ["storage", "tabs", "scripting", "notifications"],
+  "host_permissions": ["https://www.amazon.com/*"],
+  "background": {
+    "service_worker": "bg.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.amazon.com/gp/subscribe-and-save/manager/viewsubscriptions*",
+        "https://www.amazon.com/auto-deliveries/subscriptionList*",
+        "https://www.amazon.com/auto-deliveries*"
+      ],
+      "js": ["utils.js", "selectors.js", "scan.js", "content_manager.js"],
+      "css": ["ui/panel.css"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.amazon.com/*"],
+      "js": ["utils.js", "selectors.js", "content_cancel.js", "content_progress.js"],
+      "css": ["ui/panel.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": false
+  }
+}

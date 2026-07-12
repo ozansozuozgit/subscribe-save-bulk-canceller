@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Subscribe &amp; Save Bulk Canceller</title>
+  <style>
+    :root {
+      --surface: #ffffff;
+      --surface-2: #f6f7f8;
+      --border: #e3e6ea;
+      --border-strong: #cdd2d8;
+      --text: #191c20;
+      --text-2: #5a626c;
+      --text-3: #8b929c;
+      --red: #d64533;
+      --red-deep: #b93424;
+      --red-soft: #fdefed;
+      --red-border: #f3cdc8;
+      --amber: #9a6b00;
+      --green: #1e7d47;
+      --focus: #2563eb;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin: 0; }
+    body {
+      width: 380px;
+      background: var(--surface);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        "Helvetica Neue", Arial, sans-serif;
+      font-size: 13.5px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+    ::selection { background: rgba(37, 99, 235, 0.18); }
+    button, input, select { font-family: inherit; color: inherit; }
+    button:focus-visible, a:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+
+    /* ── Header ─────────────────────────── */
+    .nameplate {
+      padding: 14px 18px 12px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .nameplate__brand {
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      color: var(--text);
+    }
+    .nameplate__brand .amp { color: var(--red); padding: 0 0.04em; }
+    .nameplate__vol {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--text-3);
+    }
+
+    /* ── Status row ─────────────────────────── */
+    .status {
+      padding: 14px 18px;
+      display: grid;
+      grid-template-columns: 9px 1fr;
+      align-items: start;
+      gap: 10px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface-2);
+    }
+    .status-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--text-3);
+      flex-shrink: 0;
+      margin-top: 5px;
+    }
+    .status-dot.idle { background: var(--text-3); }
+    .status-dot.reviewing { background: var(--red); }
+    .status-dot.running { background: var(--red); animation: blink 1.2s ease-in-out infinite; }
+    .status-dot.paused { background: var(--amber); }
+    .status-dot.done { background: var(--green); }
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+    #status-text {
+      font-size: 13.5px;
+      font-weight: 500;
+      color: var(--text);
+      line-height: 1.4;
+    }
+
+    /* ── Stats ─────────────────────────── */
+    .stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      padding: 12px 18px;
+      border-bottom: 1px solid var(--border);
+      gap: 0;
+    }
+    .stat {
+      padding-left: 12px;
+      border-left: 1px solid var(--border);
+    }
+    .stat:first-child { border-left: 0; padding-left: 0; }
+    .stat-value {
+      font-size: 22px;
+      font-weight: 700;
+      line-height: 1.1;
+      letter-spacing: -0.01em;
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
+    #stat-cancelled { color: var(--green); }
+    #stat-failed { color: var(--red); }
+    .stat-label {
+      margin-top: 2px;
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text-2);
+    }
+
+    /* ── Actions ─────────────────────────── */
+    .actions {
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+    }
+    .btn {
+      display: block;
+      width: 100%;
+      min-height: 40px;
+      padding: 10px 14px;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      font-size: 13.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 140ms, color 140ms, border-color 140ms, transform 100ms;
+      text-align: center;
+    }
+    .btn:active { transform: translateY(1px); }
+    .btn--primary {
+      background: var(--text);
+      color: #ffffff;
+    }
+    .btn--primary:hover { background: #000000; }
+    .btn--danger {
+      background: var(--red);
+      color: #ffffff;
+    }
+    .btn--danger:hover { background: var(--red-deep); }
+    .btn--ghost {
+      background: var(--surface);
+      color: var(--text-2);
+      border-color: var(--border);
+      font-weight: 500;
+    }
+    .btn--ghost:hover { color: var(--text); border-color: var(--border-strong); background: var(--surface-2); }
+
+    /* ── Failures ─────────────────────────── */
+    .fail-section {
+      padding: 12px 18px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    .fail-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+    .fail-label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--red-deep);
+    }
+    .fail-count {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--red-deep);
+      line-height: 1;
+    }
+    .failures {
+      max-height: 180px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .failures::-webkit-scrollbar { width: 8px; }
+    .failures::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
+    .fail-row {
+      display: grid;
+      grid-template-columns: 12px 1fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 8px 11px;
+      border-bottom: 1px solid var(--border);
+      background: var(--red-soft);
+    }
+    .fail-row:last-child { border-bottom: 0; }
+    .fail-icon {
+      color: var(--red);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .fail-title {
+      font-size: 12.5px;
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .fail-link {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--red-deep);
+      text-decoration: none;
+    }
+    .fail-link:hover { text-decoration: underline; }
+    .fail-hint {
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--text-2);
+      line-height: 1.5;
+    }
+
+    /* ── Footer ─────────────────────────── */
+    .colophon {
+      padding: 10px 18px 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--surface-2);
+    }
+    .opts-link {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-2);
+      text-decoration: none;
+    }
+    .opts-link:hover { color: var(--text); text-decoration: underline; }
+    .colophon-mark {
+      font-size: 11px;
+      color: var(--text-3);
+    }
+
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+
+  <header class="nameplate">
+    <div class="nameplate__brand">Subscribe <span class="amp">&amp;</span> Save</div>
+    <div class="nameplate__vol">Bulk Canceller</div>
+  </header>
+
+  <section class="status">
+    <div class="status-dot idle" id="status-dot"></div>
+    <div id="status-text">Loading…</div>
+  </section>
+
+  <section class="stats" id="stats" hidden>
+    <div class="stat">
+      <div class="stat-value" id="stat-active">0</div>
+      <div class="stat-label">To cancel</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value" id="stat-cancelled">0</div>
+      <div class="stat-label">Cancelled</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value" id="stat-failed">0</div>
+      <div class="stat-label">Failed</div>
+    </div>
+  </section>
+
+  <section class="actions">
+    <button class="btn btn--primary" id="btn-open">Open subscriptions page</button>
+    <button class="btn btn--ghost" id="btn-rescan" hidden>Reset and rescan</button>
+  </section>
+
+  <section class="fail-section" id="fail-section" hidden>
+    <div class="fail-head">
+      <span class="fail-label">Needs attention</span>
+      <span class="fail-count" id="fail-count">0</span>
+    </div>
+    <div class="failures" id="failures"></div>
+    <div class="fail-hint">Open each one on Amazon to finish manually &mdash; we&rsquo;ve left them untouched.</div>
+  </section>
+
+  <footer class="colophon">
+    <a class="opts-link" href="#" id="options-link">Settings</a>
+    <span class="colophon-mark">v2.0</span>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>
