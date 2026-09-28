@@ -282,8 +282,16 @@
   </section>
 
   <section class="actions">
+    <div id="saved-status" class="fail-hint" role="status"></div>
     <button class="btn btn--primary" id="btn-open">Open subscriptions page</button>
-    <button class="btn btn--ghost" id="btn-rescan" hidden>Reset and rescan</button>
+    <button class="btn btn--ghost" id="btn-rescan" hidden>Rescan with saved choices</button>
+    <button class="btn btn--ghost" id="btn-export">Export saved choices &amp; history</button>
+    <details>
+      <summary>Restore saved choices</summary>
+      <textarea id="import-data" aria-label="Saved choices JSON" style="width:100%;min-height:70px"></textarea>
+      <button class="btn btn--ghost" id="btn-import">Restore choices</button>
+      <div id="import-result" role="status"></div>
+    </details>
   </section>
 
   <section class="fail-section" id="fail-section" hidden>
@@ -292,12 +300,12 @@
       <span class="fail-count" id="fail-count">0</span>
     </div>
     <div class="failures" id="failures"></div>
-    <div class="fail-hint">Open each one on Amazon to finish manually &mdash; we&rsquo;ve left them untouched.</div>
+    <div class="fail-hint">Your choices and attempts are saved. Rescan to retry failed items. Check unconfirmed results on Amazon first.</div>
   </section>
 
   <footer class="colophon">
     <a class="opts-link" href="#" id="options-link">Settings</a>
-    <span class="colophon-mark">v2.0</span>
+    <span class="colophon-mark">v2.1</span>
   </footer>
 
   <script src="popup.js"></script>

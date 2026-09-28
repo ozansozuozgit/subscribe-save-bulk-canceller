@@ -69,7 +69,7 @@
             <div class="sns-progress__label">Complete</div>
             <div class="sns-progress__count">${done}/${s.totalToProcess}</div>
           </div>
-          <div class="sns-progress__title">All done — ${s.cancelled} cancelled${s.failed ? `, ${s.failed} failed` : ''}.</div>
+          <div class="sns-progress__title">Finished — ${s.cancelled} cancelled${s.failed ? `, ${s.failed} failed` : ''}.</div>
           <div class="sns-progress__bar"><div class="sns-progress__bar-fill" style="width:100%"></div></div>
           <div class="sns-progress__chips">
             ${s.cancelled ? `<span class="sns-chip sns-chip--ok">✓ ${s.cancelled} cancelled</span>` : ''}
@@ -77,7 +77,7 @@
             ${s.kept ? `<span class="sns-chip sns-chip--keep">★ ${s.kept} kept</span>` : ''}
           </div>
           <div class="sns-progress__summary">
-            ${s.failed ? `<strong>${s.failed} item${s.failed === 1 ? '' : 's'}</strong> need manual attention — open the popup to see them.` : `Everything processed successfully.`}
+            ${s.failed ? `<strong>${s.failed} item${s.failed === 1 ? '' : 's'}</strong> need attention. Your selections are saved — rescan to retry.` : `Everything processed successfully.`}
           </div>
           <div class="sns-progress__controls">
             <button id="sns-dismiss">Dismiss</button>
@@ -109,6 +109,7 @@
           <div class="sns-progress__count">${idxLabel}</div>
         </div>
         <div class="sns-progress__title">${escapeHtml(current?.title || 'Preparing…')}</div>
+        ${current?.error ? `<div class="sns-progress__summary">${escapeHtml(current.error)}</div>` : ''}
         <div class="sns-progress__bar">
           <div class="sns-progress__bar-fill" style="width:${pct}%"></div>
         </div>

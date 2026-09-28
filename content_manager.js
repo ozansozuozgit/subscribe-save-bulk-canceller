@@ -3,6 +3,7 @@
 // kicks off the run via the background worker.
 
 (function () {
+  if (!window.SNSSelectors.MANAGER_URL_RE.test(location.href)) return;
   if (window.__SNS_MANAGER_BOOTED__) return;
   window.__SNS_MANAGER_BOOTED__ = true;
 
@@ -141,6 +142,7 @@
       : item.shippingSoon
         ? '<span class="sns-badge">Next</span>'
         : '';
+    const warning = item.needsReview ? '<span>Review needed: matching subscriptions</span>' : '';
     const meta = item.nextDate ? `<span>Next: ${escapeHtml(item.nextDate)}</span>${soon}` : `<span>Active subscription</span>`;
     const img = item.image
       ? `<img src="${escapeAttr(item.image)}" alt="" loading="lazy"/>`
@@ -151,7 +153,7 @@
         <div class="sns-item__thumb">${img}</div>
         <div class="sns-item__body">
           <div class="sns-item__title">${escapeHtml(item.title || 'Untitled')}</div>
-          <div class="sns-item__meta">${meta}</div>
+          <div class="sns-item__meta">${meta}${warning}</div>
         </div>
       </div>
     `;
@@ -296,7 +298,7 @@
     } else if (n === 1) {
       subtitle = 'One recurring order, ready to review.';
     } else {
-      subtitle = `${n} recurring orders, ready to review.`;
+      subtitle = `${n} subscriptions · choices saved in this browser.`;
     }
     return `
       <div class="sns-card__header">
@@ -446,11 +448,12 @@
       ),
     ];
     for (const el of candidates) {
+      if (el.closest('#sns-root,#sns-modal,#sns-progress-root') || !window.SNSUtils.visible(el)) continue;
       const txt = NORM(el.innerText || el.value || el.getAttribute('aria-label') || el.textContent);
       if (!txt || /disabled|unavailable/.test(txt)) continue;
       const ariaDisabled = el.getAttribute('aria-disabled') === 'true';
       const disabled = el.disabled || ariaDisabled || el.classList?.contains('a-disabled');
-      if (disabled || !labels.some((label) => txt.includes(label))) continue;
+      if (disabled || !(labels.includes(txt) || /^(show|load|view|see) more (subscriptions|deliveries)(?: \(?\d+\)?)?$/.test(txt))) continue;
       if (el.classList?.contains('subscription-pagination-trigger')) return el;
       const shell = el.closest('.a-button');
       const native = el.closest('button, a, [role="button"], input[type="button"], input[type="submit"]');
@@ -464,16 +467,18 @@
     let lastCount = best.length;
     const originalScrollY = window.scrollY;
     for (let pass = 0; pass < 8; pass++) {
+      const sentinel = document.querySelector('#endOfGridDesktop[data-next-url], #endOfGridMobile[data-next-url]');
       const more = findLoadMoreControl();
-      if (!more) break;
+      if (!more && !sentinel?.getAttribute('data-next-url')) break;
       setScanNote(`Loading more subscriptions (${lastCount || 0} found)…`);
-      realClick(more);
+      if (sentinel?.getAttribute('data-next-url')) sentinel.scrollIntoView({ block: 'center' });
+      else realClick(more);
       const deadline = Date.now() + 5000;
       let next = best;
       while (Date.now() < deadline) {
         await sleep(350);
         next = mergeItems(best, scan());
-        if (next.length > lastCount || !findLoadMoreControl()) break;
+        if (next.length > lastCount) break;
       }
       best = next;
       if (best.length <= lastCount) break;
@@ -540,7 +545,7 @@
         <div class="sns-modal__header">
           <div class="sns-modal__title">Cancel ${c.cancel} subscription${c.cancel === 1 ? '' : 's'}?</div>
           <div class="sns-modal__lede">
-            We'll open each subscription's edit page, pick your reason, and confirm — one at a time.
+            We'll open each subscription's Edit dialog, pick your reason, and confirm — one at a time.
             <strong> ${c.kept} item${c.kept === 1 ? '' : 's'} will be kept untouched.</strong>
           </div>
         </div>
@@ -593,6 +598,11 @@
       close();
     });
 
+    msg('sns:getState').then(run => {
+      const select = document.getElementById('sns-reason-select');
+      if (select) select.value = run?.reason || '';
+    });
+
     // ESC to close
     const onKey = (e) => { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); } };
     document.addEventListener('keydown', onKey);
@@ -600,6 +610,7 @@
 
   // ---------- Scan & lifecycle ----------
   async function doScan() {
+    if (state.scanning || ['running', 'paused'].includes(state.runStatus)) return;
     state.scanning = true;
     state.scanNote = 'Loading every visible subscription…';
     renderPanel();
@@ -630,7 +641,11 @@
     state.items = enrichItems(bestItems.length ? bestItems : items);
     state.scanning = false;
     state.scanNote = '';
-    await msg('sns:scanComplete', { items: state.items });
+    const result = await msg('sns:scanComplete', { items: state.items });
+    if (result?.run) {
+      state.items = enrichItems(result.run.items.filter(item => item.status !== 'done'));
+      state.runStatus = result.run.status;
+    }
     renderPanel();
   }
 
@@ -649,15 +664,22 @@
     if (area !== 'local' || !changes.sns_run) return;
     const next = changes.sns_run.newValue;
     if (!next) return;
-    if (next.status !== state.runStatus) {
-      state.runStatus = next.status;
-      if (state.runStatus === 'idle' || state.runStatus === 'done' || state.runStatus === 'reviewing') {
+    const previousStatus = state.runStatus;
+    state.runStatus = next.status;
+    if (['idle', 'done', 'reviewing'].includes(state.runStatus)) {
+      if (!state.scanning) {
+        const items = enrichItems((next.items || []).filter(item => item.status !== 'done'));
+        // Local toggles are already rendered; don't reset their scroll/focus
+        // when the background acknowledges the same choices.
+        if (previousStatus === next.status && JSON.stringify(items) === JSON.stringify(state.items)) return;
+        state.items = items;
+        document.getElementById('sns-modal')?.remove();
         renderPanel();
-      } else {
-        // Hide while running — progress panel takes over
-        const root = document.getElementById(ROOT_ID);
-        if (root) root.innerHTML = '';
       }
+    } else {
+      // Hide while running — progress panel takes over
+      const root = document.getElementById(ROOT_ID);
+      if (root) root.innerHTML = '';
     }
   });
 

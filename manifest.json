@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Subscribe & Save — Bulk Canceller",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Review every Amazon Subscribe & Save subscription with images and titles, then bulk-cancel the ones you don't want — with a live progress panel and safe per-item failure handling.",
   "icons": {
     "16": "icons/16.png",

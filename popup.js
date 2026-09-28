@@ -90,7 +90,7 @@ function render(run) {
         <div class="fail-row">
           <span class="fail-icon">!</span>
           <span class="fail-title" title="${escapeHtml(i.error || '')}">${escapeHtml(i.title || 'Untitled')}</span>
-          <a class="fail-link" href="${escapeHtml(i.cancelUrl || i.editUrl || '')}" target="_blank" rel="noopener">Open</a>
+          <a class="fail-link" href="${escapeHtml(i.cancelUrl || i.editUrl || SUBS_URL)}" target="_blank" rel="noopener">Open</a>
         </div>`
       )
       .join('');
@@ -102,6 +102,7 @@ function render(run) {
 async function init() {
   const run = await msg('sns:getState');
   render(run);
+  renderSaved(await msg('sns:getSaved'));
 
   document.getElementById('btn-open').addEventListener('click', async () => {
     const tabs = await chrome.tabs.query({ url: 'https://www.amazon.com/*', currentWindow: true });
@@ -126,6 +127,25 @@ async function init() {
     window.close();
   });
 
+  document.getElementById('btn-import').addEventListener('click', async () => {
+    try {
+      const data = JSON.parse(document.getElementById('import-data').value);
+      const result = await msg('sns:import', { data });
+      document.getElementById('import-result').textContent = result?.ok
+        ? `${result.count} saved choices restored. Rescan to apply them.` : result?.error || 'Restore failed.';
+    } catch (_) { document.getElementById('import-result').textContent = 'Paste valid saved choices JSON.'; }
+  });
+
+  document.getElementById('btn-export').addEventListener('click', async () => {
+    const data = await msg('sns:export');
+    const url = URL.createObjectURL(new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), ...data }, null, 2)], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `subscribe-save-history-${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+
   document.getElementById('options-link').addEventListener('click', (e) => {
     e.preventDefault();
     chrome.runtime.openOptionsPage();
@@ -134,6 +154,14 @@ async function init() {
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && changes.sns_run) render(changes.sns_run.newValue);
+  if (area === 'local' && changes.sns_saved) renderSaved(changes.sns_saved.newValue);
 });
+
+function renderSaved(items) {
+  const identified = (Array.isArray(items) ? items : []).filter(item => item.subscriptionId);
+  const confirmed = identified.filter(item => item.status === 'done').length;
+  const pending = identified.filter(item => !item.keep && item.status !== 'done').length;
+  setText('saved-status', `Saved history: ${confirmed} cancelled · ${pending} remaining to check or cancel.`);
+}
 
 init();

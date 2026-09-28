@@ -1,258 +1,107 @@
-// Drives the cancel flow on a Subscribe & Save edit page.
-// Only acts when bg.js reports status === 'running' and we're on the expected URL.
-// Each cancellation is a small state machine:
-//   1. Click "Cancel subscription" button
-//   2. Wait for reason step marker → pick a reason radio
-//   3. Click confirm button
-//   4. Wait for success marker (DOM or URL) → report itemDone
-// Any step that times out reports itemFailed and lets bg.js advance the queue.
-
+// Cancel only the assigned subscription in the assigned tab, once per attempt.
 (function () {
   if (window.__SNS_CANCEL_BOOTED__) return;
   window.__SNS_CANCEL_BOOTED__ = true;
-
-  const {
-    sleep, waitFor, waitForDescriptor, resolve, resolveAndClick,
-    byText, visible, realClick, isClickable, NORM,
-  } = window.SNSUtils;
+  const { waitFor, visible, realClick, NORM } = window.SNSUtils;
   const S = window.SNSSelectors;
+  const msg = (type, payload = {}) => new Promise(resolve =>
+    chrome.runtime.sendMessage({ type, ...payload }, resolve));
 
-  const PER_STEP_TIMEOUT_MS = 6000;
-  const SUCCESS_TIMEOUT_MS = 8000;
-  const ERROR_TEXTS = [
-    'there was a problem loading this action',
-    'there was an error processing your request',
-  ];
-
-  function hasAmazonError() {
-    const body = NORM(document.body.innerText || '');
-    return ERROR_TEXTS.some((t) => body.includes(t));
+  function cancellationForm(item) {
+    return [...document.querySelectorAll('form')].find(form => {
+      try {
+        const url = new URL(form.action, location.href);
+        const sid = url.searchParams.get('subscriptionId') || form.querySelector('[name="subscriptionId"]')?.value;
+        return url.origin === location.origin && /cancelSubscriptionAction/i.test(url.pathname) && sid === item.subscriptionId && visible(form);
+      } catch (_) { return false; }
+    });
   }
 
-  async function getState() {
-    return new Promise((res) => chrome.runtime.sendMessage({ type: 'sns:getState' }, res));
-  }
-  function report(type, payload = {}) {
-    try { chrome.runtime.sendMessage({ type, ...payload }); } catch (_) {}
-  }
-
-  function isEditPage() {
-    return S.EDIT_URL_RE.test(location.href);
-  }
-  function isSuccessPage() {
-    if (S.SUCCESS_URL_RE.test(location.href)) return true;
-    return !!resolve(S.SUCCESS_MARKER[0]) || S.SUCCESS_MARKER.some((d) => !!resolve(d));
+  function successVisible() {
+    const phrases = /(?:subscription (?:has been |was |is now )?(?:cancelled|canceled)|(?:cancelled|canceled) your subscription|cancellation confirmed)/i;
+    return [...document.querySelectorAll('h1,h2,h3,h4,p,.a-alert-content,[data-csa-c-content-id="cancellation-confirmation"]')]
+      .some(el => !el.closest('#sns-root,#sns-modal,#sns-progress-root') && visible(el) && phrases.test(el.textContent));
   }
 
-  async function selectReason(reasonText) {
-    // The new /cancelSubscription page uses a <select> dropdown; the legacy
-    // edit flow uses radio inputs. Try the <select> path first, then radios.
-    if (await selectReasonInDropdown(reasonText)) return true;
-    return await selectReasonInRadios(reasonText);
+  function selectReason(form, requested) {
+    if (!requested) return;
+    const aliases = {
+      "i don't want this item anymore": 'i no longer use this product',
+      "i'm not using this product": 'i no longer use this product',
+      'price is too high': 'this product is too expensive',
+      'found a better alternative': 'i want a different flavor/brand/scent',
+    };
+    const wanted = aliases[NORM(requested)] || NORM(requested);
+    const select = form.querySelector('select[name*="cancellation"],select[name*="reason"],select[id*="reason"]');
+    if (select) {
+      const option = [...select.options].find(option => NORM(option.textContent) === wanted);
+      // Reason is optional: never silently pick an unrelated answer.
+      if (!option) return;
+      select.value = option.value;
+      select.dispatchEvent(new Event('input', { bubbles: true }));
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    }
   }
 
-  async function selectReasonInDropdown(reasonText) {
-    const selects = [...document.querySelectorAll('select')].filter(visible);
-    for (const sel of selects) {
-      // Skip <select>s that don't look like a reason picker.
-      const idName = ((sel.id || '') + ' ' + (sel.name || '')).toLowerCase();
-      const labelText = NORM([
-        sel.getAttribute('aria-label') || '',
-        document.querySelector(`label[for="${sel.id}"]`)?.textContent || '',
-      ].join(' '));
-      const looksLikeReason =
-        /reason|cancel/.test(idName) ||
-        labelText.includes('reason') ||
-        labelText.includes('cancelling') ||
-        labelText.includes('canceling');
-      if (!looksLikeReason) continue;
-
-      const opts = [...sel.options];
-      const wanted = NORM(reasonText);
-      const candidates = [wanted, ...S.REASON_OPTIONS.map(NORM)];
-      let match = null;
-      for (const cand of candidates) {
-        if (!cand) continue;
-        match = opts.find((o) => NORM(o.text).includes(cand));
-        if (match) break;
-      }
-      // Last resort — pick the first non-empty option.
-      if (!match) match = opts.find((o) => o.value && NORM(o.text));
-      if (!match) continue;
-      sel.value = match.value;
-      sel.dispatchEvent(new Event('input', { bubbles: true }));
-      sel.dispatchEvent(new Event('change', { bubbles: true }));
-      await sleep(120);
-      return true;
+  async function openForm(item, identity) {
+    const findTile = () => [...document.querySelectorAll('[data-edit-url]')].find(tile => {
+      const url = new URL(tile.getAttribute('data-edit-url'), location.origin);
+      return url.origin === location.origin && url.searchParams.get('subscriptionId') === item.subscriptionId && visible(tile);
+    });
+    await waitFor(() => document.querySelector('[data-edit-url]'), { timeout: 12000 });
+    let tile = findTile();
+    for (let page = 0; !tile && page < 20; page++) {
+      const sentinel = document.querySelector('#endOfGridDesktop[data-next-url],#endOfGridMobile[data-next-url]');
+      if (!sentinel?.getAttribute('data-next-url')) break;
+      const count = document.querySelectorAll('[data-edit-url]').length;
+      sentinel.scrollIntoView({ block: 'center' });
+      await waitFor(() => findTile() || document.querySelectorAll('[data-edit-url]').length > count, { timeout: 10000 });
+      tile = findTile();
     }
-    return false;
-  }
-
-  async function selectReasonInRadios(reasonText) {
-    const wanted = NORM(reasonText);
-    const fallbackList = [reasonText, ...S.REASON_OPTIONS];
-    for (const candidate of fallbackList) {
-      const hits = byText(document, candidate, S.REASON_RADIO_TAGS);
-      const ordered = hits
-        .filter((el) => visible(el))
-        .map((el) => {
-          if (el.tagName === 'INPUT' && el.type === 'radio') return el;
-          if (el.tagName === 'LABEL') {
-            const id = el.htmlFor;
-            const radio = id ? document.getElementById(id) : el.querySelector('input[type=radio]');
-            return radio || el;
-          }
-          const parentLabel = el.closest('label');
-          if (parentLabel) {
-            const id = parentLabel.htmlFor;
-            const radio = id ? document.getElementById(id) : parentLabel.querySelector('input[type=radio]');
-            return radio || parentLabel;
-          }
-          const ancestor = el.closest('div,li,tr,fieldset') || el.parentElement;
-          if (ancestor) {
-            const radio = ancestor.querySelector('input[type=radio]');
-            if (radio) return radio;
-          }
-          return el;
-        });
-      if (ordered.length) {
-        realClick(ordered[0]);
-        await sleep(150);
-        return true;
-      }
-    }
-    const anyRadio = [...document.querySelectorAll('input[type=radio]')].find(visible);
-    if (anyRadio) {
-      realClick(anyRadio);
-      await sleep(150);
-      return true;
-    }
-    return false;
-  }
-
-  function findConfirmButton() {
-    for (const d of S.CONFIRM_BUTTON) {
-      const el = resolve(d);
-      if (el && isClickable(el)) return el;
-    }
-    return null;
-  }
-
-  async function runCancelFlow(run) {
-    const idx = run.currentIndex;
-    const item = run.items[idx];
-    const startUrl = location.href;
-    console.log(`[SNS Cancel] item ${idx + 1}/${run.items.length} on ${location.pathname}`);
-
-    if (isSuccessPage()) {
-      report('sns:itemDone');
-      return;
-    }
-
-    // Page-aware: if we're already on the dedicated cancel-confirm page, skip
-    // straight to the reason + confirm step.
-    const onCancelConfirmPage = S.CANCEL_CONFIRM_URL_RE.test(location.href);
-
-    if (!onCancelConfirmPage) {
-      // Step A — detail page: click the "Cancel subscription" link.
-      await sleep(150);
-      let cancelEl = await waitFor(() => {
-        for (const d of S.CANCEL_BUTTON) {
-          const el = resolve(d);
-          if (el && isClickable(el)) return el;
-        }
-        return null;
-      }, { timeout: PER_STEP_TIMEOUT_MS, interval: 100 });
-      if (!cancelEl) {
-        report('sns:itemFailed', { error: 'Cancel link not found on detail page' });
-        return;
-      }
-      realClick(cancelEl);
-
-      // Two outcomes: either the URL changes to /cancelSubscription, or a
-      // confirm form appears inline. Whichever happens first wins.
-      const transitioned = await waitFor(
-        () => S.CANCEL_CONFIRM_URL_RE.test(location.href) || findConfirmButton() || hasAmazonError(),
-        { timeout: PER_STEP_TIMEOUT_MS, interval: 120 }
-      );
-      if (!transitioned) {
-        report('sns:itemFailed', { error: 'Cancel click did not lead anywhere' });
-        return;
-      }
-      if (hasAmazonError()) {
-        // One quick retry.
-        await sleep(700);
-        cancelEl = resolveAndClick(S.CANCEL_BUTTON);
-        await waitFor(
-          () => S.CANCEL_CONFIRM_URL_RE.test(location.href) || findConfirmButton(),
-          { timeout: PER_STEP_TIMEOUT_MS, interval: 120 }
-        );
-      }
-    }
-
-    // Step B — confirm page: optionally pick a reason, then click confirm.
-    // The new layout marks reason as Optional, so skipping is always fine.
-    const wantReason = typeof run.reason === 'string' && run.reason.trim().length > 0;
-    if (wantReason) {
-      // Give the form a brief moment to mount.
-      await waitFor(
-        () => document.querySelector('select, input[type="radio"]'),
-        { timeout: 2000, interval: 100 }
-      );
-      await selectReason(run.reason);
-    }
-
-    const confirmEl = await waitFor(findConfirmButton, { timeout: PER_STEP_TIMEOUT_MS, interval: 100 });
-    if (!confirmEl) {
-      report('sns:itemFailed', { error: 'Confirm button not found on cancel page' });
-      return;
-    }
-    realClick(confirmEl);
-
-    // Some flows surface a secondary confirm dialog right after.
-    await sleep(350);
-    const secondary = findConfirmButton();
-    if (secondary && secondary !== confirmEl) realClick(secondary);
-
-    // Step C — wait for success: URL change away from edit/cancel URLs, or
-    // an in-DOM success marker.
-    const ok = await waitFor(() => {
-      if (isSuccessPage()) return true;
-      if (location.href !== startUrl && !S.EDIT_URL_RE.test(location.href)) return true;
-      return false;
-    }, { timeout: SUCCESS_TIMEOUT_MS, interval: 150 });
-    if (!ok) {
-      report('sns:itemFailed', { error: 'Success confirmation never appeared' });
-      return;
-    }
-    report('sns:itemDone');
+    if (!tile) throw new Error('This subscription was not found in the active list. Check whether it was already cancelled.');
+    if (!(await msg('sns:authorizeStep', identity))?.ok) return null;
+    const edit = tile.querySelector('[data-edit-link]');
+    if (!edit) throw new Error('The subscription Edit control is missing.');
+    realClick(edit);
+    const cancelLink = await waitFor(() => [...document.querySelectorAll('[role="dialog"] a[href]')].find(link => {
+      const url = new URL(link.href, location.origin);
+      return visible(link) && url.origin === location.origin && url.pathname === '/auto-deliveries/cancelSubscription' && url.searchParams.get('subscriptionId') === item.subscriptionId;
+    }), { timeout: 12000 });
+    if (!cancelLink) throw new Error('Cancel subscription was not found in the selected item’s dialog.');
+    if (!(await msg('sns:authorizeStep', identity))?.ok) return null;
+    realClick(cancelLink);
+    return await waitFor(() => cancellationForm(item), { timeout: 12000 });
   }
 
   async function maybeRun() {
-    const run = await getState();
-    if (!run || run.status !== 'running') return;
-    if (run.currentIndex < 0 || !run.items[run.currentIndex]) return;
-
-    // Confirmation landings (after a navigation triggered by Amazon itself) — just report done
-    if (isSuccessPage() && !isEditPage()) {
-      console.log('[SNS Cancel] success landing detected on', location.href);
-      await sleep(600);
-      report('sns:itemDone');
+    const run = await msg('sns:getState');
+    const item = run?.items?.[run.currentIndex];
+    if (run?.status !== 'running' || item?.status !== 'inflight') return;
+    const identity = { itemId: item.id, runId: run.runId, attempt: item.attempts };
+    if (!(await msg('sns:authorizeStep', identity))?.ok) return;
+    const fail = error => msg('sns:itemFailed', { ...identity, error });
+    if (item.phase === 'confirming' && location.pathname.startsWith('/auto-deliveries/')) {
+      const confirmed = await waitFor(successVisible, { timeout: 12000, interval: 150 });
+      if (confirmed) await msg('sns:itemDone', identity);
+      else await fail('Amazon did not show a cancellation confirmation after navigation. Check this item before retrying.');
       return;
     }
-
-    // Only drive the flow on edit pages
-    if (!isEditPage()) return;
-
+    if (!S.MANAGER_URL_RE.test(location.href)) return;
     try {
-      await runCancelFlow(run);
-    } catch (err) {
-      console.error('[SNS Cancel] uncaught', err);
-      report('sns:itemFailed', { error: String(err?.message || err) });
+      const form = await openForm(item, identity);
+      if (!form && !(await msg('sns:authorizeStep', identity))?.ok) return;
+      if (!form) { await fail('Could not verify the cancellation form for this subscription. Selection saved.'); return; }
+      selectReason(form, run.reason);
+      const button = form.querySelector('input[data-csa-c-slot-id="cancel-subs-modal"],button[type="submit"],input[type="submit"]');
+      if (!button || button.disabled || !visible(button)) { await fail('Cancellation confirmation button is unavailable.'); return; }
+      if (!(await msg('sns:confirming', identity))?.ok) return;
+      realClick(button);
+      const success = await waitFor(successVisible, { timeout: 12000, interval: 150 });
+      if (success) await msg('sns:itemDone', identity);
+      else await fail('Amazon did not show a cancellation confirmation. Check this item before retrying.');
+    } catch (error) {
+      await fail(String(error?.message || error));
     }
   }
-
-  // Re-evaluate shortly after document_idle. The AJAX subscription pages we
-  // drive are mostly server-rendered, so this can be tight without races.
   setTimeout(maybeRun, 400);
 })();

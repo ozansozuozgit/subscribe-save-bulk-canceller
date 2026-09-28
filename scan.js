@@ -103,6 +103,13 @@
   }
 
   function findEditUrlInTile(tile) {
+    const raw = tile.getAttribute('data-edit-url') || tile.querySelector('[data-edit-url]')?.getAttribute('data-edit-url');
+    if (raw) {
+      try {
+        const url = new URL(raw, location.origin);
+        if (url.origin === location.origin && /\/auto-deliveries\//.test(url.pathname)) return url.href;
+      } catch (_) {}
+    }
     // Prefer a real <a> with an edit-ish href
     for (const css of TILE_FIELDS.editLinkCss) {
       const a = tile.querySelector(css);
@@ -162,7 +169,8 @@
     if (!subscriptionId) return null;
     const params = new URLSearchParams({
       subscriptionId,
-      sourcePage: 'subscriptionList',
+      clientName: 'mydHub',
+      enableMydExperience: '1',
     });
     return `https://www.amazon.com/auto-deliveries/cancelSubscription?${params.toString()}`;
   }
@@ -178,15 +186,17 @@
     // From edit URL query
     try {
       const u = new URL(editUrl, location.origin);
-      const asin = u.searchParams.get('asin') || u.searchParams.get('ASIN');
+      const asin = u.searchParams.get('subAsin') || u.searchParams.get('asin') || u.searchParams.get('ASIN');
       if (asin) return asin;
-      const sid = u.searchParams.get('subscriptionId') || u.searchParams.get('subscription_id');
-      if (sid) return sid;
     } catch (_) {}
     return null;
   }
 
   function extractTitle(tile) {
+    const fullTitle = tile.querySelector('.a-truncate-full');
+    if (textOf(fullTitle)) return textOf(fullTitle);
+    const productImage = tile.querySelector('img[alt]:not([role="presentation"])');
+    if (productImage?.alt?.trim()) return productImage.alt.trim();
     for (const css of TILE_FIELDS.titleCss) {
       const el = tile.querySelector(css);
       if (el && isVisible(el, tile.ownerDocument || document)) {
@@ -270,6 +280,27 @@
   }
 
   function scan(root = document) {
+    // Current Amazon cards expose the actual subscription identity here.
+    // Never hash hydrated/truncated text when a stable ID is available.
+    const modern = [...root.querySelectorAll('[data-edit-url]')].filter(tile =>
+      isVisible(tile, root) && !tile.closest('#sns-root, #sns-modal, #sns-progress-root')
+    );
+    if (modern.length) {
+      const items = new Map();
+      for (const tile of modern) {
+        const editUrl = findEditUrlInTile(tile);
+        const subscriptionId = extractSubscriptionId(editUrl);
+        if (!subscriptionId || !tile.querySelector('img')) continue;
+        items.set(subscriptionId, {
+          id: subscriptionId, subscriptionId, editUrl,
+          cancelUrl: buildCancelUrl(subscriptionId),
+          asin: extractAsin(tile, editUrl),
+          title: extractTitle(tile), image: extractImage(tile),
+          nextDate: extractNextDate(tile),
+        });
+      }
+      if (items.size) return [...items.values()];
+    }
     const anchors = findEditAnchors(root);
     const seenKey = new Set();
     const seenTile = new Set();
@@ -305,6 +336,7 @@
 
     // Pass 2 — new subscriptionList layout: tiles discovered via "Next delivery by".
     for (const tile of findTilesByMarker(root)) {
+      if (tile.closest('#sns-root, #sns-modal, #sns-progress-root')) continue;
       if (seenTile.has(tile)) continue;
       seenTile.add(tile);
       const editUrl = findEditUrlInTile(tile);
@@ -326,9 +358,6 @@
       });
     }
 
-    try {
-      console.debug('[S&S] scan found', items.length, 'items', items);
-    } catch (_) {}
     return items;
   }
 

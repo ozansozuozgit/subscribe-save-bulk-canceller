@@ -70,7 +70,7 @@
     });
   }
 
-  // Click an element with both click() and a synthetic MouseEvent — Amazon ignores some bare .click() calls.
+  // Dispatch a single click. Dispatching a second click can submit a form twice.
   function realClick(el) {
     if (!el) return false;
     try {
@@ -79,12 +79,9 @@
       try { el.scrollIntoView(); } catch (_) {}
     }
     try {
-      el.click();
-    } catch (_) {}
-    try {
       el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
       el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      el.click();
     } catch (_) {}
     return true;
   }
