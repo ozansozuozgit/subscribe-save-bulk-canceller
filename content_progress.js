@@ -8,19 +8,24 @@
 // card no longer blinks out and fades back in on every per-item page load.
 // The .sns-progress element is created once per page and only its contents
 // are replaced, and only when the rendered markup actually changes.
+// It is drawn inside the shadow root of the #sns-progress-root host
+// (ui/host.js), so the page's CSS can't restyle it.
 
 (function () {
   if (window.__SNS_PROGRESS_BOOTED__) return;
   window.__SNS_PROGRESS_BOOTED__ = true;
 
-  // Use a SEPARATE root from content_manager so we never stomp on each other's UI.
+  // Use a SEPARATE host from content_manager so we never stomp on each other's UI.
   const ROOT_ID = 'sns-progress-root';
-  const OWNED_ATTR = 'data-sns-progress-owned';
   const SUBS_URL = 'https://www.amazon.com/auto-deliveries/subscriptionList';
   const DEFAULT_PER_ITEM_MS = 9000; // first estimate, before any item has finished
 
+  let shadow = null;
+  let wrapEl = null;
   let panelEl = null;
+  let liveEl = null; // persistent live region: survives the panel's content swaps
   let lastHtml = '';
+  let lastLive = '';
   let latestRun;
   let renderQueued = false;
   let notice = ''; // local message, e.g. when the extension was reloaded
@@ -28,14 +33,16 @@
   const nextFrame = (fn) => (window.requestAnimationFrame ? window.requestAnimationFrame(fn) : setTimeout(fn, 16));
 
   function ensureRoot() {
-    let root = document.getElementById(ROOT_ID);
-    if (!root) {
-      root = document.createElement('div');
-      root.id = ROOT_ID;
-      root.setAttribute(OWNED_ATTR, '1');
-      document.documentElement.appendChild(root);
+    if (!wrapEl || !wrapEl.isConnected) {
+      shadow = window.SNSHost.attach(ROOT_ID, 2147483647);
+      wrapEl = shadow.querySelector('.sns-ui');
+      if (!wrapEl) {
+        wrapEl = document.createElement('div');
+        wrapEl.className = 'sns-ui';
+        shadow.appendChild(wrapEl);
+      }
     }
-    return root;
+    return wrapEl;
   }
 
   function ensurePanel() {
@@ -48,17 +55,23 @@
       panelEl.setAttribute('role', 'region');
       panelEl.setAttribute('aria-label', 'Cancellation progress');
       panelEl.addEventListener('click', onClick);
-      root.appendChild(panelEl);
+      liveEl = document.createElement('div');
+      liveEl.className = 'sns-sr';
+      liveEl.setAttribute('role', 'status');
+      liveEl.setAttribute('aria-live', 'polite');
+      root.append(panelEl, liveEl);
       lastHtml = '';
+      lastLive = '';
     }
     return panelEl;
   }
 
   function clearOwnRoot() {
-    const root = document.getElementById(ROOT_ID);
-    if (root) root.replaceChildren();
+    if (wrapEl) wrapEl.replaceChildren();
     panelEl = null;
+    liveEl = null;
     lastHtml = '';
+    lastLive = '';
   }
 
   // Never throws (see content_manager.js): resolves undefined when the
@@ -140,7 +153,7 @@
           <div class="sns-progress__dot ${s.failed ? 'sns-progress__dot--paused' : 'sns-progress__dot--done'}" aria-hidden="true"></div>
           <h2 class="sns-progress__label">${s.failed ? 'Finished, with problems' : 'Finished'}</h2>
         </div>
-        <div class="sns-progress__title" role="status">${escapeHtml(parts.join(', '))}.</div>
+        <div class="sns-progress__title">${escapeHtml(parts.join(', '))}.</div>
         <div class="sns-progress__body">
           ${section('Needs attention', failed, 'sns-sum__list--fail', true, true)}
           ${section('Cancelled', cancelled, 'sns-sum__list--ok', !failed.length, false)}
@@ -182,7 +195,7 @@
           <h2 class="sns-progress__label">${paused ? 'Paused' : 'Cancelling'}</h2>
           <div class="sns-progress__count">${position} of ${s.totalToProcess}</div>
         </div>
-        <div class="sns-progress__title" aria-live="polite">${escapeHtml(current?.title || 'Getting ready…')}</div>
+        <div class="sns-progress__title">${escapeHtml(current?.title || 'Getting ready…')}</div>
         <div class="sns-progress__bar" role="progressbar" aria-label="Cancelled so far" aria-valuemin="0" aria-valuemax="${s.totalToProcess}" aria-valuenow="${done}">
           <div class="sns-progress__bar-fill" style="width:${pct}%"></div>
         </div>
@@ -199,6 +212,30 @@
         </div>`;
   }
 
+  // Short text for screen readers: what is happening now.
+  function liveText(run) {
+    const s = summarize(run.items || []);
+    if (run.status === 'done') {
+      const parts = [`${s.cancelled} cancelled`];
+      if (s.kept) parts.push(`${s.kept} kept`);
+      if (s.failed) parts.push(`${s.failed} failed`);
+      return `Finished: ${parts.join(', ')}.`;
+    }
+    if (run.status === 'paused') return 'Cancelling paused.';
+    const current = run.items?.[run.currentIndex];
+    return current?.title ? `Cancelling ${current.title}.` : 'Cancelling.';
+  }
+
+  // Replacing the markup would drop keyboard focus on a removed button (for
+  // example Pause, which becomes Resume). Put it back on the matching control.
+  const FOCUS_SWAP = { 'sns-pause': 'sns-resume', 'sns-resume': 'sns-pause' };
+  function restoreFocus(id) {
+    if (!id) return;
+    const next = [shadow.getElementById(id), shadow.getElementById(FOCUS_SWAP[id])]
+      .find((el) => el && !el.disabled) || panelEl.querySelector('.sns-progress__controls button:not([disabled])');
+    try { next?.focus({ preventScroll: true }); } catch (_) {}
+  }
+
   function render(run) {
     if (!run || (run.status !== 'running' && run.status !== 'paused' && run.status !== 'done')) {
       // Nothing for us to render. Clear ONLY our own root, never content_manager's.
@@ -208,8 +245,16 @@
     const panel = ensurePanel();
     const html = panelHtml(run);
     if (html !== lastHtml) {
+      const active = shadow.activeElement;
+      const focusedId = active && panel.contains(active) ? active.id || null : null;
       panel.innerHTML = html;
       lastHtml = html;
+      restoreFocus(focusedId);
+    }
+    const live = liveText(run);
+    if (live !== lastLive) {
+      liveEl.textContent = live;
+      lastLive = live;
     }
   }
 
@@ -245,7 +290,16 @@
         if (confirm('Stop now? Items already cancelled stay cancelled. The rest are left as they are.')) send('sns:stop');
         break;
       case 'sns-dismiss': send('sns:reset'); break;
-      case 'sns-rescan-after': location.href = SUBS_URL; break;
+      case 'sns-rescan-after':
+        // Clear the summary first: while a finished run is showing, the page
+        // shows the summary instead of scanning, so reloading alone would
+        // just bring the summary back.
+        btn.disabled = true;
+        send('sns:reset').then((reply) => {
+          if (reply?.ok) location.href = SUBS_URL;
+          else btn.disabled = false;
+        });
+        break;
       default: break;
     }
   }

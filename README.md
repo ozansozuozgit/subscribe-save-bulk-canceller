@@ -70,6 +70,8 @@ The popup's **Backup & restore** section has **Download a backup**, which downlo
 
 Run `npm ci && npm test` for the scanner, persistence, settings, popup, rendering/loading-state and cancellation regression tests. Tests use synthetic subscription data and never contact Amazon. GitHub runs these tests and JavaScript syntax checks on every push and pull request.
 
+`tests/browser.test.cjs` also loads the extension into a real Chromium (Playwright) against a mocked page with hostile global CSS, and checks the launcher, panel, confirm step, progress card and finish summary layout. It needs Playwright and its Chromium (`npm i -D playwright && npx playwright install chromium`, or point `SNS_PLAYWRIGHT` at an existing install). Without them it is skipped with a message; set `SNS_REQUIRE_BROWSER=1` to make that a failure.
+
 ## Packaging for the Chrome Web Store
 
 Zip only the extension files: `manifest.json`, `*.js`, `*.html`, `ui/`, `icons/`, `LICENSE`. Leave out `tests/`, `node_modules/`, `package*.json`, `.github/`, `private/`, `CHANGES.md` and this README. From the repo root:

@@ -1,24 +1,23 @@
+// The injected UI stylesheet, loaded into each shadow root by ui/host.js.
+// Kept in a script (not a .css file) so it is applied synchronously, with no
+// unstyled flash and no web_accessible_resources.
+(function () {
+  if (window.SNSStyles) return;
+  window.SNSStyles = `
 /* ============================================================
    Subscription Bulk Canceller: injected UI (v2.1.2)
    Calm and compact: white surfaces, one accent (red) reserved for
    "will cancel" and destructive actions, 4/8/12/16 px spacing.
+
+   This stylesheet lives inside the shadow roots created by ui/host.js,
+   so the page's CSS can't reach our elements and ours can't leak out.
+   Inherited properties are cut off at the host (all: initial), and
+   .sns-ui sets every inherited text property explicitly.
    ============================================================ */
 
-#sns-root,
-#sns-progress-root,
-.sns-modal-root,
-#sns-root *,
-#sns-progress-root *,
-.sns-modal-root * {
-  box-sizing: border-box;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, sans-serif;
-  -webkit-font-smoothing: antialiased;
-}
+*, *::before, *::after { box-sizing: border-box; }
 
-#sns-root,
-#sns-progress-root,
-.sns-modal-root {
+.sns-ui {
   --surface: #ffffff;
   --surface-2: #f6f7f8;
   --surface-3: #eceef1;
@@ -40,33 +39,27 @@
   --shadow-lg: 0 18px 48px -12px rgba(16, 20, 28, 0.28), 0 4px 12px -4px rgba(16, 20, 28, 0.10);
   --shadow-md: 0 8px 24px -8px rgba(16, 20, 28, 0.25), 0 2px 6px -2px rgba(16, 20, 28, 0.10);
 
-  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
   font-size: 14px;
+  font-weight: 400;
+  font-style: normal;
   line-height: 1.45;
+  color: var(--text);
+  text-align: left;
+  text-indent: 0;
+  text-transform: none;
+  letter-spacing: normal;
+  word-spacing: normal;
+  white-space: normal;
+  direction: ltr;
+  visibility: visible;
+  cursor: auto;
+  -webkit-font-smoothing: antialiased;
 }
 
-/* #sns-root is only an anchor. Everything inside positions itself against
-   the viewport (position: fixed), so a zero-width root can never squash
-   the launcher (v2.1.1 bug: the minimized pill wrapped into a bubble). */
-#sns-root {
-  position: fixed;
-  right: 0;
-  bottom: 0;
-  width: 0;
-  height: 0;
-  z-index: 2147483646;
-}
-
-#sns-progress-root {
-  position: fixed;
-  right: 16px;
-  bottom: 16px;
-  z-index: 2147483647;
-}
-
-/* Reset host styles. :where() keeps specificity at zero. */
-:where(#sns-root, #sns-progress-root, .sns-modal-root)
-  :where(button, input, select, label, span, div, p, h1, h2, h3, ul, ol, li, strong, em, a, details, summary) {
+/* Reset UA styles. :where() keeps specificity at zero. */
+:where(button, input, select, label, span, div, p, h1, h2, h3, ul, ol, li, strong, em, a, details, summary, section) {
   font: inherit;
   color: inherit;
   letter-spacing: 0;
@@ -76,17 +69,15 @@
   text-shadow: none;
   list-style: none;
 }
-:where(#sns-root, #sns-progress-root, .sns-modal-root) :where(strong) { font-weight: 600; }
-:where(#sns-root, #sns-progress-root, .sns-modal-root) :where(em) { font-style: normal; font-weight: 600; }
-:where(#sns-root, #sns-progress-root, .sns-modal-root) :where(button) {
+:where(strong) { font-weight: 600; }
+:where(em) { font-style: normal; font-weight: 600; }
+:where(button) {
   cursor: pointer;
   background: transparent;
   border: 0;
 }
 
-#sns-root :focus-visible,
-#sns-progress-root :focus-visible,
-.sns-modal-root :focus-visible {
+:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
@@ -102,6 +93,8 @@
 
 /* ============================================================
    Launcher: the default, collapsed state
+   Fixed to the viewport and sized by its own content, so neither the
+   host nor the page can squash it into a wrapped bubble.
    ============================================================ */
 .sns-launcher {
   position: fixed;
@@ -110,8 +103,11 @@
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  max-width: calc(100vw - 32px);
-  padding: 8px 12px 8px 8px;
+  width: max-content;
+  max-width: none;
+  height: auto;
+  margin: 0;
+  padding: 6px 12px 6px 6px;
   white-space: nowrap;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -122,8 +118,8 @@
 }
 .sns-launcher:hover { border-color: var(--border-strong); box-shadow: var(--shadow-lg); }
 .sns-launcher__icon {
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   flex-shrink: 0;
   display: grid;
   place-items: center;
@@ -131,7 +127,7 @@
   background: var(--red);
   color: #ffffff;
 }
-.sns-launcher__icon svg { width: 18px; height: 18px; }
+.sns-launcher__icon svg { width: 17px; height: 17px; }
 .sns-launcher__body { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
 .sns-launcher__name { font-size: 11.5px; font-weight: 600; color: var(--text-3); }
 .sns-launcher__text {
@@ -591,6 +587,9 @@
    every per-item page load and must look continuous.
    ============================================================ */
 .sns-progress {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
   width: 340px;
   max-width: calc(100vw - 32px);
   max-height: calc(100vh - 32px);
@@ -680,3 +679,5 @@
   .sns-progress__bar-fill { transition: none; }
   .sns-spinner { animation-duration: 1.6s; }
 }
+`;
+})();

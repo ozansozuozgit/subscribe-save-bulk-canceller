@@ -39,10 +39,9 @@
         "utils.js",
         "selectors.js",
         "scan.js",
+        "ui/styles.js",
+        "ui/host.js",
         "content_manager.js"
-      ],
-      "css": [
-        "ui/panel.css"
       ],
       "run_at": "document_idle"
     },
@@ -56,9 +55,6 @@
         "selectors.js",
         "content_cancel.js"
       ],
-      "css": [
-        "ui/panel.css"
-      ],
       "run_at": "document_idle"
     },
     {
@@ -67,6 +63,8 @@
         "https://www.amazon.com/gp/subscribe-and-save/*"
       ],
       "js": [
+        "ui/styles.js",
+        "ui/host.js",
         "content_progress.js"
       ],
       "run_at": "document_start"

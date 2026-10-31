@@ -151,16 +151,29 @@
   const RUN_OWNS_SCREEN = ['running', 'paused', 'done'];
 
   // ---------- DOM ----------
+  // Everything is drawn inside the shadow root of the #sns-root host
+  // (ui/host.js), so Amazon's CSS can't restyle it. Look elements up with
+  // byId() / shadow.querySelector(), never document.*.
   const ROOT_ID = 'sns-root';
+  let shadow = null;
+  let appRoot = null;
+
+  function byId(id) {
+    return shadow ? shadow.getElementById(id) : null;
+  }
 
   function ensureRoot() {
-    let root = document.getElementById(ROOT_ID);
-    if (!root) {
-      root = document.createElement('div');
-      root.id = ROOT_ID;
-      document.documentElement.appendChild(root);
+    if (!appRoot || !appRoot.isConnected) {
+      shadow = window.SNSHost.attach(ROOT_ID, 2147483646);
+      appRoot = shadow.querySelector('.sns-app');
+      if (!appRoot) {
+        appRoot = document.createElement('div');
+        appRoot.className = 'sns-ui sns-app';
+        shadow.appendChild(appRoot);
+      }
+      mountedMode = null; // a new (or re-attached) host must be mounted again
     }
-    return root;
+    return appRoot;
   }
 
   function svg(name) {
@@ -261,7 +274,7 @@
 
   function mount(root, mode) {
     rowCache.clear();
-    if (mode === 'hidden') { root.replaceChildren(); return; }
+    if (mode === 'hidden') { closeModal?.({ restoreFocus: false }); root.replaceChildren(); return; }
     if (mode === 'launcher') {
       root.innerHTML = `
         <button type="button" class="sns-launcher" id="sns-launcher" aria-expanded="false" aria-controls="sns-panel">
@@ -272,7 +285,7 @@
           </span>
           <span class="sns-launcher__chev" aria-hidden="true">${svg('up')}</span>
         </button>`;
-      document.getElementById('sns-launcher').addEventListener('click', () => setOpen(true));
+      byId('sns-launcher').addEventListener('click', () => setOpen(true));
       return;
     }
     const card = ensureCard(root);
@@ -306,22 +319,22 @@
         </div>`;
       bindToolbar();
       bindList();
-      document.getElementById('sns-rescan').addEventListener('click', doScan);
-      document.getElementById('sns-preview').addEventListener('click', openPreview);
+      byId('sns-rescan').addEventListener('click', doScan);
+      byId('sns-preview').addEventListener('click', openPreview);
     }
     bindHeader();
-    document.getElementById('sns-retry')?.addEventListener('click', doScan);
+    byId('sns-retry')?.addEventListener('click', doScan);
   }
 
   function setOpen(open) {
     saveUi({ panelOpen: open });
     renderPanel();
-    const target = open ? document.getElementById('sns-panel-title') : document.getElementById('sns-launcher');
+    const target = open ? byId('sns-panel-title') : byId('sns-launcher');
     try { target?.focus({ preventScroll: true }); } catch (_) { target?.focus(); }
   }
 
   function updateLauncher() {
-    const text = document.getElementById('sns-launcher-text');
+    const text = byId('sns-launcher-text');
     if (!text) return;
     const n = state.items.length;
     let label;
@@ -349,26 +362,26 @@
       if (subtitle) subtitle.textContent = subtitleText();
     }
     const showHow = !ui.howSeen || !!state.howOpen;
-    const how = document.getElementById('sns-how');
+    const how = byId('sns-how');
     if (how) how.hidden = !showHow;
-    document.getElementById('sns-help')?.setAttribute('aria-expanded', String(showHow));
-    const noteEl = document.getElementById('sns-scan-note');
+    byId('sns-help')?.setAttribute('aria-expanded', String(showHow));
+    const noteEl = byId('sns-scan-note');
     if (noteEl) {
       // In list mode a failed rescan is reported in the same strip, above the
       // previous (still valid) list.
       const showError = !state.scanning && !!state.error && mode === 'list';
       noteEl.hidden = !state.scanning && !showError;
       noteEl.classList.toggle('sns-scan-note--error', showError);
-      document.getElementById('sns-scan-note-text').textContent = showError
+      byId('sns-scan-note-text').textContent = showError
         ? state.error
         : state.scanNote || 'Loading your subscriptions…';
     }
-    const rescan = document.getElementById('sns-rescan');
+    const rescan = byId('sns-rescan');
     if (rescan) {
       rescan.disabled = !!state.scanning;
       rescan.textContent = state.scanning ? 'Scanning…' : 'Rescan';
     }
-    if (mode === 'error') document.getElementById('sns-error-msg').textContent = state.error || '';
+    if (mode === 'error') byId('sns-error-msg').textContent = state.error || '';
     if (mode === 'list') {
       renderList(true);
       updateCounts();
@@ -400,7 +413,7 @@
   }
 
   function renderList(preserveScroll = true) {
-    const list = document.getElementById('sns-list');
+    const list = byId('sns-list');
     if (!list) return;
     const visibleItems = sortItems(filteredItems());
     let next;
@@ -435,18 +448,18 @@
   function updateCounts() {
     const c = counts();
     const set = (id, value) => {
-      const el = document.getElementById(id);
+      const el = byId(id);
       if (el && el.textContent !== String(value)) el.textContent = String(value);
     };
     set('sns-stat-total', c.total);
     set('sns-stat-total-label', c.total === 1 ? 'subscription' : 'subscriptions');
     set('sns-stat-cancel', c.cancel);
     set('sns-stat-keep', c.kept);
-    document.querySelectorAll('.sns-filter').forEach((btn) => {
+    shadow.querySelectorAll('.sns-filter').forEach((btn) => {
       const label = filterLabel(btn.getAttribute('data-filter'));
       if (btn.textContent !== label) btn.textContent = label;
     });
-    const preview = document.getElementById('sns-preview');
+    const preview = byId('sns-preview');
     if (preview) {
       preview.disabled = !c.cancel;
       preview.textContent = c.cancel ? `Review & cancel ${c.cancel}` : 'Choose items to cancel';
@@ -480,17 +493,17 @@
   }
 
   function bindHeader() {
-    document.getElementById('sns-minimize')?.addEventListener('click', () => setOpen(false));
-    document.getElementById('sns-help')?.addEventListener('click', () => {
+    byId('sns-minimize')?.addEventListener('click', () => setOpen(false));
+    byId('sns-help')?.addEventListener('click', () => {
       const showing = !ui.howSeen || state.howOpen;
       if (showing) { saveUi({ howSeen: true }); state.howOpen = false; } else state.howOpen = true;
       renderPanel();
     });
-    document.getElementById('sns-how-done')?.addEventListener('click', () => {
+    byId('sns-how-done')?.addEventListener('click', () => {
       saveUi({ howSeen: true });
       state.howOpen = false;
       renderPanel();
-      document.getElementById('sns-help')?.focus();
+      byId('sns-help')?.focus();
     });
   }
 
@@ -501,19 +514,19 @@
       renderList(true);
       updateCounts();
     };
-    document.getElementById('sns-select-all').addEventListener('click', () => setAll(false));
-    document.getElementById('sns-keep-all').addEventListener('click', () => setAll(true));
-    document.querySelectorAll('.sns-filter').forEach((btn) => {
+    byId('sns-select-all').addEventListener('click', () => setAll(false));
+    byId('sns-keep-all').addEventListener('click', () => setAll(true));
+    shadow.querySelectorAll('.sns-filter').forEach((btn) => {
       btn.addEventListener('click', () => {
         state.filterBy = btn.getAttribute('data-filter') || 'all';
-        document.querySelectorAll('.sns-filter').forEach((b) => {
+        shadow.querySelectorAll('.sns-filter').forEach((b) => {
           b.classList.toggle('sns-filter--active', b === btn);
           b.setAttribute('aria-pressed', String(b === btn));
         });
         renderList(false);
       });
     });
-    const search = document.getElementById('sns-search');
+    const search = byId('sns-search');
     search.addEventListener('input', () => {
       state.query = search.value;
       renderList(false);
@@ -521,7 +534,7 @@
   }
 
   function bindList() {
-    const list = document.getElementById('sns-list');
+    const list = byId('sns-list');
     if (!list) return;
     list.addEventListener('click', (e) => {
       const row = e.target.closest('.sns-item');
@@ -542,7 +555,7 @@
     pushKeepToBg();
     const item = state.items.find((i) => i.id === id);
     const stillVisible = filteredItems().some((i) => i.id === id);
-    const row = document.querySelector(`#sns-list .sns-item[data-id="${cssEscape(id)}"]`);
+    const row = shadow.querySelector(`#sns-list .sns-item[data-id="${cssEscape(id)}"]`);
     if (row && item && stillVisible) {
       // Flip just this row: the list keeps its scroll position and focus.
       applyChoice(row, item);
@@ -718,6 +731,8 @@
   }
 
   // ---------- Preview modal ----------
+  let closeModal = null; // closes the open confirm dialog, if any
+
   function seconds(ms) {
     const s = Math.round((Number(ms) || 0) / 100) / 10;
     return String(s).replace(/\.0$/, '');
@@ -737,9 +752,10 @@
         ${i.image ? `<img src="${escapeAttr(i.image)}" alt=""/>` : '<span class="sns-modal__noimg"></span>'}
         <span class="sns-modal__list-item-title">${escapeHtml(i.title || 'Untitled')}</span>
       </li>`;
-    const opener = document.activeElement;
+    closeModal?.({ restoreFocus: false });
+    const opener = shadow.activeElement;
     const modalEl = document.createElement('div');
-    modalEl.className = 'sns-modal-root';
+    modalEl.className = 'sns-ui sns-modal-root';
     modalEl.id = 'sns-modal';
     modalEl.innerHTML = `
       <div class="sns-modal-backdrop"></div>
@@ -774,37 +790,45 @@
         </div>
       </div>
     `;
-    document.documentElement.appendChild(modalEl);
+    shadow.appendChild(modalEl);
     const dialog = modalEl.querySelector('.sns-modal');
 
     const onKey = (e) => {
       if (e.key === 'Escape') { close(); return; }
       if (e.key !== 'Tab') return;
-      // Keep keyboard focus inside the dialog while it is open.
+      // Keep keyboard focus inside the dialog while it is open. Focus inside
+      // our shadow root shows up as shadow.activeElement, not document's.
       const focusable = [...dialog.querySelectorAll('button:not([disabled]), select, summary, [tabindex="0"]')];
       if (!focusable.length) return;
       const first = focusable[0], last = focusable[focusable.length - 1];
-      if (e.shiftKey && (document.activeElement === first || document.activeElement === dialog)) { e.preventDefault(); last.focus(); }
-      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      const active = shadow.activeElement;
+      if (e.shiftKey && (active === first || active === dialog || !modalEl.contains(active))) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && (active === last || !modalEl.contains(active))) { e.preventDefault(); first.focus(); }
     };
-    const close = () => {
+    // Also used when the dialog goes stale (choices changed in another tab, or
+    // a run took over the screen), so its key listener never outlives it.
+    const close = ({ restoreFocus = true } = {}) => {
+      if (closeModal !== close) return;
+      closeModal = null;
       modalEl.remove();
       document.removeEventListener('keydown', onKey, true);
-      const back = document.getElementById('sns-preview') || opener;
+      if (!restoreFocus) return;
+      const back = byId('sns-preview') || opener;
       try { back?.focus?.({ preventScroll: true }); } catch (_) {}
     };
+    closeModal = close;
     document.addEventListener('keydown', onKey, true);
-    modalEl.querySelector('.sns-modal-backdrop').addEventListener('click', close);
-    document.getElementById('sns-cancel-modal').addEventListener('click', close);
-    document.getElementById('sns-confirm-run').addEventListener('click', async () => {
-      const confirmBtn = document.getElementById('sns-confirm-run');
+    modalEl.querySelector('.sns-modal-backdrop').addEventListener('click', () => close());
+    byId('sns-cancel-modal').addEventListener('click', () => close());
+    byId('sns-confirm-run').addEventListener('click', async () => {
+      const confirmBtn = byId('sns-confirm-run');
       if (confirmBtn.disabled) return;
       confirmBtn.disabled = true; // a second click must not queue a second start request
       const idleLabel = confirmBtn.innerHTML;
       confirmBtn.innerHTML = '<span class="sns-spinner sns-spinner--light" aria-hidden="true"></span>Starting…';
       confirmBtn.setAttribute('aria-busy', 'true');
-      const reason = document.getElementById('sns-reason-select').value;
-      const err = document.getElementById('sns-modal-error');
+      const reason = byId('sns-reason-select').value;
+      const err = byId('sns-modal-error');
       if (err) err.hidden = true;
       await flushKeep();
       const r = await msg('sns:startRun', { reason });
@@ -818,17 +842,16 @@
         }
         return;
       }
-      modalEl.remove();
-      document.removeEventListener('keydown', onKey, true);
+      close({ restoreFocus: false }); // the progress card takes over the screen
     });
     try { dialog.focus({ preventScroll: true }); } catch (_) {}
 
     msg('sns:getState').then((run) => {
-      const select = document.getElementById('sns-reason-select');
+      const select = byId('sns-reason-select');
       if (select) select.value = run?.reason || '';
     });
     msg('sns:getOptions').then((opts) => {
-      const pace = document.getElementById('sns-pace');
+      const pace = byId('sns-pace');
       const [lo, hi] = Array.isArray(opts?.jitterMs) ? opts.jitterMs : [];
       if (pace && lo && hi) pace.textContent = `${seconds(lo)}–${seconds(hi)} second`;
     });
@@ -941,7 +964,7 @@
     }
     if (!sameChoices(items, state.items)) {
       state.items = items;
-      document.getElementById('sns-modal')?.remove(); // choices changed elsewhere; the preview is stale
+      closeModal?.({ restoreFocus: false }); // choices changed elsewhere; the preview is stale
     }
     renderPanel();
   });

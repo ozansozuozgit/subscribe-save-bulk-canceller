@@ -15,6 +15,22 @@ Permissions and match patterns are unchanged.
 - **The minimized pill was squashed and covered Rescan.** It sat inside a zero-width fixed root, so its text wrapped into a
   narrow bubble, and it overlapped the progress card. The pill is replaced by a launcher button that positions itself against
   the viewport and never wraps, and it is hidden whenever the progress card is shown.
+- **Page CSS could restyle the extension's UI** (on Amazon the launcher rendered as a tall oval with its text on 4 lines).
+  The UI was injected into the page's DOM with a page-level stylesheet, so Amazon's global rules (on `*`, `div`, `button`,
+  inherited font sizes and line heights) applied to it. All injected UI (launcher, review panel, confirm dialog, progress card,
+  finish summary) now lives in open shadow roots on two host elements (`ui/host.js`). Each host has inline
+  `all: initial !important` plus fixed positioning, so nothing is inherited from the page and page rules that match the host
+  itself lose. The stylesheet moved from `ui/panel.css` to `ui/styles.js` and is adopted into each shadow root synchronously,
+  so the progress card is still fully styled from its first frame at `document_start`. The manifest no longer injects CSS
+  into the page. The launcher is `width: max-content` and slightly slimmer (46 px tall).
+- **"Rescan" on the finish summary did nothing.** It reloaded the page, but a finished run keeps the summary on screen, so
+  the summary just came back. It now clears the finished run first, then reloads, and the page scans again.
+- **A confirm dialog closed from another tab left its key handler behind.** When choices changed elsewhere, the dialog was
+  removed but its `keydown` listener stayed, so every later Escape on the page moved focus to the panel footer. The dialog
+  is now closed the same way in every case (also when a run takes over the screen).
+- **Progress card accessibility.** Updates replace the card's markup, which dropped keyboard focus (Pause turns into
+  Resume) and recreated the `aria-live` element, so changes weren't reliably announced. Focus now returns to the matching
+  control, and a persistent status region announces the current item, pauses and the final result.
 - **The progress card flickered on every item.** Each item is a full page load. The card was drawn 400 ms after the page was
   ready, with a fade/slide-in each time. `content_progress.js` now runs at `document_start` (its own content-script entry
   with the same match patterns), draws straight from `chrome.storage.local`, has no entrance animation, and only touches the
@@ -44,5 +60,9 @@ Permissions and match patterns are unchanged.
   `progressbar`; lighter text colours were darkened to at least 4.5:1, and the red to 5.2:1 with white text.
 
 ### Tests
-10 new regression tests (49 total). The 39 existing tests pass unchanged, except that their harness now opens the
-panel first (`openUi()`), because the panel now starts collapsed.
+15 new jsdom regression tests (54 total). The 39 existing tests pass unchanged, except that their harness now opens the
+panel first (`openUi()`), because the panel now starts collapsed, and reads the UI through the shadow roots.
+`tests/browser.test.cjs` loads the extension into Playwright's Chromium (new headless, or headful under a display) against a
+mocked page with hostile global CSS and checks the launcher (one line, bottom-right), panel, confirm dialog, progress
+card and finish summary sizes and positions during a real 2-item run. It is skipped with a message if Playwright isn't
+installed (`SNS_REQUIRE_BROWSER=1` makes that a failure).

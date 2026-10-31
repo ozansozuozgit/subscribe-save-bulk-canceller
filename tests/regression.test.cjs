@@ -1,4 +1,4 @@
-const { test } = require('node:test');
+const { test, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
@@ -7,12 +7,51 @@ require('../state.js');
 const { reconcile, remember, targetUrl } = globalThis.SNSState;
 const modern = (id, title = 'Example product', date = 'Nov 20') => ({ id, subscriptionId: id, title, nextDate: date, image: 'https://m.media-amazon.com/images/I/EXAMPLE._SS250_.jpg', cancelUrl: `https://www.amazon.com/auto-deliveries/cancelSubscription?subscriptionId=${id}` });
 const legacy = (keep = false) => ({ ...modern('hash'), subscriptionId: null, keep, status: 'failed' });
-function page(html) {
-  const dom = new JSDOM(html, { url: 'https://www.amazon.com/auto-deliveries/subscriptionList', runScripts: 'outside-only' });
-  dom.window.HTMLElement.prototype.getBoundingClientRect = () => ({width:125,height:125});
-  for (const file of ['utils.js','selectors.js','scan.js']) dom.window.eval(fs.readFileSync(file,'utf8'));
+// Every window is closed after its test, even when an assertion failed, so no
+// timer from one test can run (and throw) after it ended. Harness replies that
+// arrive after close are dropped (see later()).
+const openDoms = new Set();
+function track(dom) {
+  const close = dom.window.close.bind(dom.window);
+  dom.closed = false;
+  dom.window.close = () => { if (dom.closed) return; dom.closed = true; openDoms.delete(dom); close(); };
+  openDoms.add(dom);
   return dom;
 }
+afterEach(() => { for (const dom of [...openDoms]) dom.window.close(); });
+// Runs fn on a later macrotask unless the test's window has been closed.
+const later = (dom, fn, ms = 0) => setTimeout(() => { if (!dom.closed) fn(); }, ms);
+// Waits for a condition instead of a fixed time. Fails with `label` on timeout.
+async function until(predicate, label = 'condition', timeout = 5000) {
+  const end = Date.now() + timeout;
+  for (;;) {
+    let value;
+    try { value = predicate(); } catch (_) { value = false; }
+    if (value) return value;
+    if (Date.now() > end) throw new Error(`Timed out after ${timeout} ms waiting for: ${label}`);
+    await new Promise(r => setTimeout(r, 5));
+  }
+}
+function page(html, options = {}) {
+  const dom = track(new JSDOM(html, { url: 'https://www.amazon.com/auto-deliveries/subscriptionList', runScripts: 'outside-only', ...options }));
+  dom.window.HTMLElement.prototype.getBoundingClientRect = () => ({width:125,height:125});
+  for (const file of ['utils.js','selectors.js','scan.js','ui/styles.js','ui/host.js']) dom.window.eval(fs.readFileSync(file,'utf8'));
+  return dom;
+}
+// v2.1.2: the injected UI lives in open shadow roots (ui/host.js). This view
+// reads through a host's shadow root, looked up again on every call.
+function shadowView(dom, hostId) {
+  const sr = () => dom.window.document.getElementById(hostId)?.shadowRoot || null;
+  return {
+    getElementById: id => sr()?.getElementById(id) ?? null,
+    querySelector: sel => sr()?.querySelector(sel) ?? null,
+    querySelectorAll: sel => sr() ? sr().querySelectorAll(sel) : [],
+    get activeElement() { return sr()?.activeElement ?? null; },
+    dispatchEvent: e => dom.window.document.dispatchEvent(e),
+  };
+}
+const managerUi = dom => shadowView(dom, 'sns-root');
+const progressUi = dom => shadowView(dom, 'sns-progress-root');
 // v2.1.2: the review panel starts collapsed. Tests that exercise the open
 // panel start with it open and the "How it works" explainer already seen.
 const openUi=()=>({get:async()=>({sns_ui:{panelOpen:true,howSeen:true}}),set:async()=>{}});
@@ -99,6 +138,8 @@ async function cancelFlow({sid='real',authorized=true,success=true,alreadySubmit
  dom.window.SNSUtils.waitFor=async predicate=>predicate();
  dom.window.setTimeout=fn=>{fn();};
  dom.window.eval(fs.readFileSync('content_cancel.js','utf8'));
+ // Every step resolves synchronously in this harness (waitFor, setTimeout and
+ // replies), so the whole flow has run by the next macrotask.
  await new Promise(resolve=>setImmediate(resolve));
  const value=dom.window.document.querySelector('select').value;
  dom.window.close(); return {clicks,reports,value};
@@ -124,7 +165,7 @@ test('manager loads successive infinite-scroll batches and never follows footer 
  dom.window.scrollTo=()=>{}; dom.window.SNSUtils.sleep=async()=>{};
  dom.window.chrome={runtime:{sendMessage:(message,reply)=>{if(message.type==='sns:scanComplete'){scanned=message.items;reply({ok:true,run:{items:message.items,status:'reviewing'}});}else reply({status:'idle'});}},storage:{local:openUi(),onChanged:{addListener:()=>{}}}};
  dom.window.eval(fs.readFileSync('content_manager.js','utf8'));
- await new Promise(resolve=>setImmediate(resolve));
+ await until(()=>scanned,'scan sent to the background');
  assert.equal(batches,2); assert.equal(scanned.length,3); assert.equal(footerClicks,0); dom.window.close();
 });
 test('manager does not scan or overwrite choices on cancellation pages',()=>{
@@ -187,7 +228,7 @@ test('navigation failure pauses safely and the message queue remains usable',asy
 
 test('open review reflects restored choices without rebuilding acknowledged local toggles',async()=>{
  const dom=page(tile('real','Selected product'));
- let changed, current;
+ let changed, current, acks=0;
  dom.window.scrollTo=()=>{}; dom.window.SNSUtils.sleep=async()=>{};
  dom.window.chrome={runtime:{sendMessage:(message,reply)=>{
   if(message.type==='sns:scanComplete') {
@@ -195,21 +236,21 @@ test('open review reflects restored choices without rebuilding acknowledged loca
    reply({ok:true,run:current});
   } else if(message.type==='sns:setKeep') {
    current={...current,items:current.items.map(item=>({...item,keep:message.keepIds.includes(item.id)}))};
-   queueMicrotask(()=>changed({sns_run:{newValue:current}},'local'));
+   queueMicrotask(()=>{ changed({sns_run:{newValue:current}},'local'); acks++; });
    reply({ok:true});
   } else reply({status:'idle'});
  }},storage:{local:openUi(),onChanged:{addListener:fn=>changed=fn}}};
  dom.window.eval(fs.readFileSync('content_manager.js','utf8'));
- await new Promise(resolve=>setImmediate(resolve));
- const row=dom.window.document.querySelector('#sns-list .sns-item');
+ const ui=managerUi(dom);
+ const row=await until(()=>ui.querySelector('#sns-list .sns-item'),'list rendered');
  row.click();
  // Choices are written after a 150 ms debounce; wait until the toggle is acknowledged.
- await new Promise(resolve=>setTimeout(resolve,250));
- assert.equal(dom.window.document.querySelector('#sns-stat-cancel').textContent,'1');
- assert.equal(dom.window.document.querySelector('#sns-list .sns-item'),row);
+ await until(()=>acks>=1,'toggle written and echoed back');
+ assert.equal(ui.querySelector('#sns-stat-cancel').textContent,'1');
+ assert.equal(ui.querySelector('#sns-list .sns-item'),row);
  current={...current,items:current.items.map(item=>({...item,keep:true}))};
  changed({sns_run:{newValue:current}},'local');
- assert.equal(dom.window.document.querySelector('#sns-stat-cancel').textContent,'0');
+ assert.equal(ui.querySelector('#sns-stat-cancel').textContent,'0');
  dom.window.close();
 });
 
@@ -230,15 +271,14 @@ test('fresh install and getOptions use the shared 2–5 s pacing default', async
 test('Settings "Restore defaults" saves exactly the shared defaults', async()=>{
  const html=fs.readFileSync('options.html','utf8');
  assert.ok(html.indexOf('src="state.js"')>=0 && html.indexOf('src="state.js"')<html.indexOf('src="options.js"'),'options.html loads state.js first');
- const dom=new JSDOM(html.replace(/<script[^>]*><\/script>/g,''),{runScripts:'outside-only'});
+ const dom=track(new JSDOM(html.replace(/<script[^>]*><\/script>/g,''),{runScripts:'outside-only'}));
  const sent=[]; let stored={reason:'Other',jitterMs:[700,900]};
  dom.window.chrome={runtime:{sendMessage:(m,reply)=>{sent.push(m); if(m.type==='sns:setOptions') stored={...stored,...m.options}; reply(m.type==='sns:getOptions'?stored:{ok:true});}}};
  dom.window.eval(fs.readFileSync('state.js','utf8')); dom.window.eval(fs.readFileSync('options.js','utf8'));
- await new Promise(r=>setTimeout(r,10));
- assert.equal(dom.window.document.getElementById('jitter-min').value,'700');
+ await until(()=>dom.window.document.getElementById('jitter-min').value==='700','saved options loaded');
  dom.window.document.getElementById('reset').click();
- await new Promise(r=>setTimeout(r,10));
- const set=sent.find(m=>m.type==='sns:setOptions');
+ const set=await until(()=>sent.find(m=>m.type==='sns:setOptions'),'defaults saved');
+ await until(()=>dom.window.document.getElementById('jitter-min').value==='2000','form shows the defaults');
  assert.deepEqual([...set.options.jitterMs],[...globalThis.SNSState.DEFAULT_OPTIONS.jitterMs]);
  assert.equal(set.options.reason,globalThis.SNSState.DEFAULT_OPTIONS.reason);
  assert.equal(dom.window.document.getElementById('jitter-min').value,'2000');
@@ -246,12 +286,12 @@ test('Settings "Restore defaults" saves exactly the shared defaults', async()=>{
  dom.window.close();
 });
 test('popup "Open" links only ever point at amazon.com', async()=>{
- const dom=new JSDOM(fs.readFileSync('popup.html','utf8').replace(/<script[^>]*><\/script>/g,''),{runScripts:'outside-only'});
+ const dom=track(new JSDOM(fs.readFileSync('popup.html','utf8').replace(/<script[^>]*><\/script>/g,''),{runScripts:'outside-only'}));
  const items=[{id:'a',title:'Bad link',status:'failed',keep:false,cancelUrl:'javascript:alert(1)'},
   {id:'b',title:'Good link',status:'failed',keep:false,cancelUrl:'https://www.amazon.com/auto-deliveries/cancelSubscription?subscriptionId=b'}];
  dom.window.chrome={runtime:{sendMessage:(m,reply)=>reply(m.type==='sns:getState'?{status:'done',items}:[])},storage:{onChanged:{addListener:()=>{}}},tabs:{}};
  dom.window.eval(fs.readFileSync('popup.js','utf8'));
- await new Promise(r=>setTimeout(r,10));
+ await until(()=>dom.window.document.querySelectorAll('.fail-link').length===2,'failed items listed');
  const links=[...dom.window.document.querySelectorAll('.fail-link')].map(a=>a.getAttribute('href'));
  assert.deepEqual(links,['https://www.amazon.com/auto-deliveries/subscriptionList','https://www.amazon.com/auto-deliveries/cancelSubscription?subscriptionId=b']);
  dom.window.close();
@@ -262,8 +302,8 @@ test('progress panel disables Skip while paused (background ignores it then)', a
   const dom=page(''); let current=run(status);
   dom.window.chrome={runtime:{sendMessage:(m,reply)=>reply(current)},storage:{onChanged:{addListener:()=>{}}}};
   dom.window.eval(fs.readFileSync('content_progress.js','utf8'));
-  await new Promise(r=>setTimeout(r,500));
-  assert.equal(dom.window.document.getElementById('sns-skip').disabled,disabled,status);
+  const skip=await until(()=>progressUi(dom).getElementById('sns-skip'),'progress card drawn');
+  assert.equal(skip.disabled,disabled,status);
   dom.window.close();
  }
 });
@@ -277,15 +317,16 @@ test('double-clicking the confirm button starts only one run', async()=>{
   reply(m.type==='sns:getState'?{status:'idle'}:{ok:true});
  }},storage:{local:openUi(),onChanged:{addListener:()=>{}}}};
  dom.window.eval(fs.readFileSync('content_manager.js','utf8'));
- for(let i=0;i<50&&!dom.window.document.querySelector('#sns-preview:not([disabled])');i++) await new Promise(r=>setTimeout(r,20));
- dom.window.document.getElementById('sns-preview').click();
- const confirm=dom.window.document.getElementById('sns-confirm-run');
+ const ui=managerUi(dom);
+ await until(()=>ui.querySelector('#sns-preview:not([disabled])'),'preview button enabled');
+ ui.getElementById('sns-preview').click();
+ const confirm=ui.getElementById('sns-confirm-run');
  confirm.click(); confirm.click();
- await new Promise(r=>setTimeout(r,20));
+ await until(()=>finishStart,'start request sent');
  assert.equal(starts,1); assert.equal(confirm.disabled,true);
- finishStart(); await new Promise(r=>setTimeout(r,20));
- assert.equal(confirm.disabled,false,'re-enabled after an error so the user can retry');
- assert.match(dom.window.document.getElementById('sns-modal-error').textContent,/Navigation failed/);
+ finishStart();
+ await until(()=>!confirm.disabled,'re-enabled after an error so the user can retry');
+ assert.match(ui.getElementById('sns-modal-error').textContent,/Navigation failed/);
  dom.window.close();
 });
 
@@ -295,26 +336,35 @@ function managerPage(tiles, handler, { scanDelay=0 } = {}) {
  const dom=page(`<div id="subscriptionsDesktopGridLayout">${tiles}</div>`);
  dom.window.scrollTo=()=>{}; dom.window.SNSUtils.sleep=async()=>{};
  const sent=[]; let changed;
- dom.window.chrome={runtime:{sendMessage:(m,reply)=>{sent.push(m); const r=handler(m,reply); if(r!==undefined) setTimeout(()=>reply(r),m.type==='sns:scanComplete'?scanDelay:0);}},storage:{local:openUi(),onChanged:{addListener:fn=>changed=fn}}};
+ dom.window.chrome={runtime:{sendMessage:(m,reply)=>{sent.push(m); const r=handler(m,reply); if(r!==undefined) later(dom,()=>reply(r),m.type==='sns:scanComplete'?scanDelay:0);}},storage:{local:openUi(),onChanged:{addListener:fn=>changed=fn}}};
  dom.window.eval(fs.readFileSync('content_manager.js','utf8'));
- return {dom,sent,doc:dom.window.document,fire:v=>changed({sns_run:{newValue:v}},'local')};
+ return {dom,sent,doc:managerUi(dom),fire:v=>changed({sns_run:{newValue:v}},'local')};
 }
-// Waits until the panel has finished its scan (or the timeout), so tests don't
-// depend on how fast a loaded machine runs the scan's timers.
-async function settled(doc,ms=1000){ for(let t=0;t<ms;t+=10){ const c=doc.querySelector('.sns-card'); if(doc.getElementById('sns-launcher')||(c&&c.getAttribute('aria-busy')==='false')) break; await tick(10);} await tick(5); }
+// Waits until the panel has finished its scan, so tests don't depend on how
+// fast a loaded machine runs the scan's timers. Fails if it never settles.
+async function settled(doc){
+ await until(()=>{
+  const c=doc.querySelector('.sns-card'), l=doc.getElementById('sns-launcher-text');
+  return (c&&c.getAttribute('aria-busy')==='false')||(l&&l.textContent&&!/Finding/.test(l.textContent));
+ },'panel finished scanning');
+}
 const reviewing=(items)=>({ok:true,run:{status:'reviewing',items:reconcile(items,[])}});
 
 test('while scanning the panel shows a loading state, never "No subscriptions found"', async()=>{
- const {dom,doc}=managerPage(tile('SNST0_A','First'),(m)=>m.type==='sns:scanComplete'?reviewing(m.items):(m.type==='sns:getState'?{status:'idle'}:{ok:true}),{scanDelay:60});
- await tick(20);
+ let release;
+ const {dom,doc}=managerPage(tile('SNST0_A','First'),(m,reply)=>{
+  if(m.type==='sns:scanComplete'){ release=()=>reply(reviewing(m.items)); return undefined; } // held until checked
+  return m.type==='sns:getState'?{status:'idle'}:{ok:true};
+ });
+ await until(()=>release,'scan sent to the background');
  const card=doc.querySelector('.sns-card');
  assert.ok(doc.querySelector('.sns-skeleton'),'skeleton rows while loading');
  assert.equal(doc.querySelector('.sns-empty'),null,'no empty state during the scan');
  assert.equal(card.getAttribute('aria-busy'),'true');
  assert.equal(doc.getElementById('sns-scan-note').hidden,false);
  assert.match(doc.getElementById('sns-scan-note').getAttribute('aria-live'),/polite/);
- await tick(120);
- assert.equal(doc.querySelectorAll('.sns-item').length,1);
+ release();
+ await until(()=>doc.querySelectorAll('.sns-item').length===1,'list shown');
  assert.equal(doc.querySelector('.sns-card'),card,'the card element (and its entrance animation) is mounted once');
  assert.equal(card.getAttribute('aria-busy'),'false');
  assert.equal(doc.getElementById('sns-scan-note').hidden,true);
@@ -323,11 +373,9 @@ test('while scanning the panel shows a loading state, never "No subscriptions fo
 test('an empty scan shows the empty state with a working "Scan again"', async()=>{
  let scans=0;
  const {dom,doc}=managerPage('',(m)=>{ if(m.type==='sns:scanComplete'){scans++; return reviewing(m.items);} return m.type==='sns:getState'?{status:'idle'}:{ok:true}; });
- await tick(30);
- assert.ok(doc.querySelector('.sns-empty'));
+ await until(()=>doc.querySelector('.sns-empty'),'empty state');
  doc.getElementById('sns-retry').click();
- await tick(30);
- assert.equal(scans,2);
+ await until(()=>scans===2,'second scan');
  dom.window.close();
 });
 test('an unreachable extension shows an error with retry instead of hanging in "Scanning"', async()=>{
@@ -336,18 +384,16 @@ test('an unreachable extension shows an error with retry instead of hanging in "
   if(m.type==='sns:scanComplete'){ if(fail) throw new Error('Extension context invalidated.'); return reviewing(m.items); }
   return m.type==='sns:getState'?{status:'idle'}:{ok:true};
  });
- await tick(30);
- assert.ok(doc.querySelector('.sns-empty--error'),'error state shown');
+ await until(()=>doc.querySelector('.sns-empty--error'),'error state shown');
  assert.match(doc.getElementById('sns-error-msg').textContent,/reload|reach/i);
  assert.equal(doc.querySelector('.sns-card').getAttribute('aria-busy'),'false');
  fail=false; doc.getElementById('sns-retry').click();
- await tick(30);
- assert.equal(doc.querySelectorAll('.sns-item').length,1);
+ await until(()=>doc.querySelectorAll('.sns-item').length===1,'list after retry');
  dom.window.close();
 });
 test('a background error during scan is shown, not a list of unsaved items', async()=>{
  const {dom,doc}=managerPage(tile('SNST0_A','First'),(m)=>m.type==='sns:scanComplete'?{ok:false,error:'A cancellation run is already active.'}:(m.type==='sns:getState'?{status:'idle'}:{ok:true}));
- await tick(30);
+ await until(()=>doc.getElementById('sns-error-msg'),'error state shown');
  assert.equal(doc.querySelectorAll('.sns-item').length,0);
  assert.match(doc.getElementById('sns-error-msg').textContent,/already active/);
  dom.window.close();
@@ -383,7 +429,8 @@ test('rapid toggles are written once, and an older echo does not undo newer clic
  fire(current);
  assert.equal(doc.getElementById('sns-stat-cancel').textContent,'3','older echo must not revert local clicks');
  assert.equal(sent.filter(m=>m.type==='sns:setKeep').length,0,'debounced');
- await tick(250);
+ await until(()=>sent.some(m=>m.type==='sns:setKeep'),'debounced write');
+ await tick(300); // two more debounce periods: nothing else may be written
  const writes=sent.filter(m=>m.type==='sns:setKeep');
  assert.equal(writes.length,1); assert.deepEqual(writes[0].keepIds,[]);
  dom.window.close();
@@ -399,22 +446,22 @@ test('starting a run flushes pending choices first and shows a busy confirm butt
  doc.querySelector('.sns-item').click();
  doc.getElementById('sns-preview').click();
  doc.getElementById('sns-confirm-run').click();
- await tick(10);
+ await until(()=>finishStart,'start request sent');
  const types=sent.map(m=>m.type).filter(t=>t==='sns:setKeep'||t==='sns:startRun');
  assert.deepEqual(types,['sns:setKeep','sns:startRun'],'choices are saved before the run starts');
  assert.deepEqual(sent.find(m=>m.type==='sns:setKeep').keepIds,['SNST0_B']);
  const btn=doc.getElementById('sns-confirm-run');
  assert.equal(btn.getAttribute('aria-busy'),'true'); assert.match(btn.textContent,/Starting/); assert.ok(btn.querySelector('.sns-spinner'));
- finishStart(); await tick(10);
- await tick(250);
+ finishStart();
+ await tick(300); // two debounce periods: no late write may follow the flush
  assert.equal(sent.filter(m=>m.type==='sns:setKeep').length,1,'no second, late write after the flush');
  dom.window.close();
 });
 test('content scripts boot once even if injected twice', async()=>{
  const {dom,doc}=managerPage(tile('SNST0_A','First'),(m)=>m.type==='sns:scanComplete'?reviewing(m.items):(m.type==='sns:getState'?{status:'idle'}:{ok:true}));
  dom.window.eval(fs.readFileSync('content_manager.js','utf8'));
- await tick(30);
- assert.equal(doc.querySelectorAll('#sns-root').length,1); assert.equal(doc.querySelectorAll('.sns-card').length,1);
+ await settled(doc);
+ assert.equal(dom.window.document.querySelectorAll('#sns-root').length,1); assert.equal(doc.querySelectorAll('.sns-card').length,1);
  dom.window.close();
 });
 test('progress panel updates in place, renders once per frame, and its buttons still work', async()=>{
@@ -422,18 +469,16 @@ test('progress panel updates in place, renders once per frame, and its buttons s
  const run=(i)=>({status:'running',runId:'r',currentIndex:i,items:[0,1,2].map(k=>({...modern('x'+k,'Item '+k),keep:false,status:k<i?'done':k===i?'inflight':'pending'}))});
  dom.window.chrome={runtime:{sendMessage:(m,reply)=>{sent.push(m.type); reply(m.type==='sns:getState'?run(0):{ok:true});}},storage:{onChanged:{addListener:fn=>changed=fn}}};
  dom.window.eval(fs.readFileSync('content_progress.js','utf8'));
- await tick(450);
- const panel=dom.window.document.querySelector('.sns-progress');
- assert.ok(panel);
+ const ui=progressUi(dom);
+ const panel=await until(()=>ui.querySelector('.sns-progress'),'progress card drawn');
  let writes=0; new dom.window.MutationObserver(()=>writes++).observe(panel,{childList:true});
  changed({sns_run:{newValue:run(1)}},'local'); changed({sns_run:{newValue:run(2)}},'local');
- await tick(40);
- assert.equal(dom.window.document.querySelector('.sns-progress'),panel,'same element, no re-entrance animation');
+ await until(()=>/Item 2/.test(panel.textContent),'next frame rendered');
+ assert.equal(ui.querySelector('.sns-progress'),panel,'same element, no re-entrance animation');
  assert.equal(writes,1,'two writes in one frame render once');
  assert.match(panel.textContent,/Item 2/);
- dom.window.document.getElementById('sns-pause').click();
- await tick(5);
- assert.ok(sent.includes('sns:pause'));
+ ui.getElementById('sns-pause').click();
+ await until(()=>sent.includes('sns:pause'),'pause sent');
  dom.window.close();
 });
 test('progress panel explains a lost connection after the extension is reloaded', async()=>{
@@ -441,17 +486,16 @@ test('progress panel explains a lost connection after the extension is reloaded'
  const run={status:'running',runId:'r',currentIndex:0,items:[{...modern('x'),keep:false,status:'inflight'}]};
  dom.window.chrome={runtime:{sendMessage:(m,reply)=>{ if(!alive) throw new Error('Extension context invalidated.'); reply(run); }},storage:{onChanged:{addListener:()=>{}}}};
  dom.window.eval(fs.readFileSync('content_progress.js','utf8'));
- await tick(450);
+ await until(()=>progressUi(dom).getElementById('sns-pause'),'progress card drawn');
  alive=false;
- dom.window.document.getElementById('sns-pause').click();
- await tick(10);
- assert.match(dom.window.document.querySelector('.sns-progress').textContent,/Reload the page/);
+ progressUi(dom).getElementById('sns-pause').click();
+ await until(()=>/Reload the page/.test(progressUi(dom).querySelector('.sns-progress').textContent),'lost-connection note');
  dom.window.close();
 });
 test('a worker restart between items pauses the stalled run; resume continues and clears the note', async()=>{
  const items=[{...modern('a'),keep:false,status:'done',attempts:1},{...modern('b'),keep:false,status:'pending'}];
  const w=await worker({sns_run:{status:'running',runId:'r',items,currentIndex:0,tabId:7}});
- await tick(5);
+ await w.send('sns:getState'); // queued behind the startup recovery
  assert.equal(w.storage.sns_run.status,'paused');
  assert.match(w.storage.sns_run.pausedReason,/restarted/);
  const r=await w.send('sns:resume');
@@ -461,39 +505,38 @@ test('a worker restart between items pauses the stalled run; resume continues an
 test('a worker restart with an item in flight leaves the run alone', async()=>{
  const items=[{...modern('a'),keep:false,status:'inflight',attempts:1}];
  const w=await worker({sns_run:{status:'running',runId:'r',items,currentIndex:0,tabId:7}});
- await tick(5);
+ await w.send('sns:getState'); // queued behind the startup recovery
  assert.equal(w.storage.sns_run.status,'running');
  assert.equal(w.storage.sns_run.pausedReason,undefined);
 });
 test('popup renders once after reading state, and offers retry when the background is unreachable', async()=>{
- const dom=new JSDOM(fs.readFileSync('popup.html','utf8').replace(/<script[^>]*><\/script>/g,''),{runScripts:'outside-only'});
+ const dom=track(new JSDOM(fs.readFileSync('popup.html','utf8').replace(/<script[^>]*><\/script>/g,''),{runScripts:'outside-only'}));
  let up=false;
  dom.window.chrome={runtime:{sendMessage:(m,reply)=>{ if(!up) throw new Error('Could not establish connection.'); reply(m.type==='sns:getState'?{status:'reviewing',items:[{...modern('a'),keep:false,status:'pending'}]}:[]); }},storage:{onChanged:{addListener:()=>{}}},tabs:{}};
  dom.window.eval(fs.readFileSync('popup.js','utf8'));
- await tick(10);
  const d=dom.window.document;
+ await until(()=>/Couldn't read/.test(d.getElementById('status-text').textContent),'unreachable state');
  assert.match(d.getElementById('status-text').textContent,/Couldn't read/);
  assert.equal(d.getElementById('btn-retry').hidden,false);
  assert.equal(d.body.getAttribute('aria-busy'),'false');
  up=true; d.getElementById('btn-retry').click();
- await tick(10);
- assert.match(d.getElementById('status-text').textContent,/ready to review/);
+ await until(()=>/ready to review/.test(d.getElementById('status-text').textContent),'state after retry');
  assert.equal(d.getElementById('btn-retry').hidden,true);
  assert.equal(d.getElementById('stat-active').textContent,'1');
  dom.window.close();
 });
 
 // ---------- v2.1.2: launcher, explainer, finish summary, flicker ----------
-const css=fs.readFileSync('ui/panel.css','utf8');
+const css=(()=>{ const ctx={window:{}}; vm.runInNewContext(fs.readFileSync('ui/styles.js','utf8'),ctx); return ctx.window.SNSStyles; })();
 const rule=sel=>{ const m=css.match(new RegExp('(^|\\n)'+sel.replace(/[.#]/g,'\\$&')+'\\s*\\{([^}]*)\\}')); return m?m[2]:''; };
 function uiStore(initial){ const store={sns_ui:initial}; return {store,local:{get:async k=>({[k]:structuredClone(store[k])}),set:async p=>Object.assign(store,structuredClone(p))}}; }
 function managerWith(local, handler){
  const dom=page(`<div id="subscriptionsDesktopGridLayout">${tile('SNST0_A','First')}${tile('SNST0_B','Second')}${tile('SNST0_C','Third')}</div>`);
  dom.window.scrollTo=()=>{}; dom.window.SNSUtils.sleep=async()=>{};
- const sent=[]; let changed;
- dom.window.chrome={runtime:{sendMessage:(m,reply)=>{sent.push(m); const r=handler(m); if(r!==undefined) setTimeout(()=>reply(r),0);}},storage:{local,onChanged:{addListener:fn=>changed=fn}}};
+ const sent=[], replied=[]; let changed;
+ dom.window.chrome={runtime:{sendMessage:(m,reply)=>{sent.push(m); const r=handler(m); if(r!==undefined) later(dom,()=>{ reply(r); replied.push(m.type); });}},storage:{local,onChanged:{addListener:fn=>changed=fn}}};
  dom.window.eval(fs.readFileSync('content_manager.js','utf8'));
- return {dom,doc:dom.window.document,sent,fire:v=>changed({sns_run:{newValue:v}},'local'),fireUi:v=>changed({sns_ui:{newValue:v}},'local')};
+ return {dom,doc:managerUi(dom),sent,replied,fire:v=>changed({sns_run:{newValue:v}},'local'),fireUi:v=>changed({sns_ui:{newValue:v}},'local')};
 }
 const idleHandler=m=>m.type==='sns:scanComplete'?reviewing(m.items):(m.type==='sns:getState'?{status:'idle'}:{ok:true});
 
@@ -505,14 +548,14 @@ test('the panel starts as a small launcher, opens on click, and remembers that i
  const launcher=doc.getElementById('sns-launcher');
  assert.ok(launcher); assert.equal(launcher.tagName,'BUTTON'); assert.equal(launcher.getAttribute('aria-expanded'),'false');
  assert.match(launcher.textContent,/3 subscriptions · Review/);
- launcher.click(); await tick(5);
+ launcher.click(); // opening, focus and saving all happen synchronously
  assert.ok(doc.querySelector('.sns-card'),'opens the panel');
  assert.equal(doc.activeElement,doc.getElementById('sns-panel-title'),'focus moves into the panel');
  assert.equal(store.sns_ui.panelOpen,true,'open state is saved');
  dom.window.close();
  ({dom,doc}=managerWith(local,idleHandler)); await settled(doc);
  assert.ok(doc.querySelector('.sns-card'),'reopens open on the next visit');
- doc.getElementById('sns-minimize').click(); await tick(5);
+ doc.getElementById('sns-minimize').click();
  assert.equal(doc.querySelector('.sns-card'),null); assert.ok(doc.getElementById('sns-launcher'));
  assert.equal(doc.activeElement,doc.getElementById('sns-launcher'),'focus returns to the launcher');
  assert.equal(store.sns_ui.panelOpen,false,'closed state is saved');
@@ -521,8 +564,29 @@ test('the panel starts as a small launcher, opens on click, and remembers that i
 test('launcher cannot be squashed: it positions itself against the viewport and never wraps', ()=>{
  const launcher=rule('.sns-launcher');
  assert.match(launcher,/position:\s*fixed/); assert.match(launcher,/white-space:\s*nowrap/);
- assert.doesNotMatch(rule('#sns-root'),/inset:\s*0 0 0 auto/,'no zero-width sidebar anchor');
+ assert.match(launcher,/width:\s*max-content/); assert.match(launcher,/max-width:\s*none/);
+ assert.doesNotMatch(css,/#sns-root/,'no styles hang off the page-level host');
  assert.doesNotMatch(css,/\.sns-pill\b/,'old pill styles are gone');
+});
+test('all injected UI lives in shadow roots that page CSS cannot reach', async()=>{
+ const {local}=uiStore({panelOpen:false,howSeen:true});
+ const {dom,doc}=managerWith(local,idleHandler); await settled(doc);
+ const d=dom.window.document, host=d.getElementById('sns-root');
+ assert.ok(host.shadowRoot,'open shadow root');
+ assert.match(host.getAttribute('style'),/all:\s*initial !important/,'inherited page styles are cut off at the host');
+ assert.match(host.getAttribute('style'),/position:\s*fixed !important/);
+ assert.equal(host.parentNode,d.documentElement,'outside the page body');
+ assert.equal(d.querySelector('.sns-launcher,.sns-card,.sns-ui'),null,'nothing of ours in the light DOM');
+ assert.ok(doc.getElementById('sns-launcher'));
+ assert.match(host.shadowRoot.querySelector('style').textContent,/\.sns-launcher\s*\{/,'stylesheet is inside the shadow root');
+ assert.match(rule('.sns-ui'),/font-size:\s*14px/); assert.match(rule('.sns-ui'),/line-height:\s*1\.45/); assert.match(rule('.sns-ui'),/white-space:\s*normal/);
+ const m=JSON.parse(fs.readFileSync('manifest.json','utf8'));
+ assert.equal(m.content_scripts.some(e=>e.css),false,'no page-level CSS injection');
+ for(const e of m.content_scripts.filter(e=>e.js.some(f=>/content_(manager|progress)/.test(f)))) {
+  assert.ok(e.js.indexOf('ui/styles.js')>=0 && e.js.indexOf('ui/styles.js')<e.js.indexOf('ui/host.js'),'styles before host');
+  assert.ok(e.js.indexOf('ui/host.js')<e.js.findIndex(f=>/content_/.test(f)),'host before the UI script');
+ }
+ dom.window.close();
 });
 test('"How it works" shows on first open, "Got it" dismisses it for good, and "?" reopens it', async()=>{
  const {store,local}=uiStore({panelOpen:true});
@@ -533,7 +597,7 @@ test('"How it works" shows on first open, "Got it" dismisses it for good, and "?
  assert.match(how.textContent,/Pick what to keep[\s\S]*Review and confirm[\s\S]*one at a time[\s\S]*pause anytime/);
  const help=doc.getElementById('sns-help');
  assert.equal(help.getAttribute('aria-label'),'How it works'); assert.equal(help.getAttribute('aria-expanded'),'true');
- doc.getElementById('sns-how-done').click(); await tick(5);
+ doc.getElementById('sns-how-done').click();
  assert.equal(how.hidden,true); assert.equal(store.sns_ui.howSeen,true); assert.equal(help.getAttribute('aria-expanded'),'false');
  help.click(); assert.equal(how.hidden,false,'"?" reopens it');
  help.click(); assert.equal(how.hidden,true);
@@ -551,7 +615,8 @@ test('rows say Keep or Cancel in words, and the confirm step states exactly what
  rows[0].click(); rows[1].click();
  assert.equal(rows[0].getAttribute('aria-pressed'),'true');
  assert.equal(doc.getElementById('sns-preview').textContent,'Review & cancel 2');
- doc.getElementById('sns-preview').click(); await tick(5);
+ doc.getElementById('sns-preview').click();
+ await until(()=>/2–5 second/.test(doc.getElementById('sns-pace')?.textContent),'pause length from Settings');
  assert.equal(doc.getElementById('sns-modal-title').textContent,'Cancel 2 subscriptions, keep 1.');
  assert.match(doc.getElementById('sns-modal-lede').textContent,/You can pause anytime/);
  assert.equal(doc.querySelectorAll('.sns-modal__list:not(.sns-modal__list--keep) li').length,2);
@@ -568,31 +633,29 @@ test('while a finish summary is showing the review panel stays out of the way, t
  const done={status:'done',items:[{...modern('SNST0_A'),keep:false,status:'done'},{...modern('SNST0_B'),keep:true,status:'pending'}]};
  let status='done';
  const {dom,doc,sent,fire}=managerWith(local,m=>m.type==='sns:getState'?(status==='done'?done:{status:'idle'}):idleHandler(m));
- await settled(doc);
- assert.equal(doc.getElementById('sns-root').children.length,0,'nothing covers the finish summary');
+ await until(()=>doc.querySelector('.sns-app'),'start-up render after reading the run');
+ assert.equal(doc.querySelector('.sns-app').children.length,0,'nothing covers the finish summary');
  assert.equal(sent.some(m=>m.type==='sns:scanComplete'),false,'the summary is not replaced by a rescan');
  // The run finishing in place on the last item's page behaves the same.
  fire({...done,status:'running'}); fire(done);
- assert.equal(doc.getElementById('sns-root').children.length,0);
+ assert.equal(doc.querySelector('.sns-app').children.length,0);
  status='reviewing'; fire({...done,status:'reviewing'}); // Done pressed
  await settled(doc);
  assert.ok(sent.some(m=>m.type==='sns:scanComplete'),'rescans what is left on the page');
  assert.ok(doc.querySelector('.sns-card'),'panel returns as the user left it');
  dom.window.close();
 });
-function progressPage(run,{storageRun=run,reply=true}={}){
- const dom=page(''); const sent=[];
+function progressPage(run,{storageRun=run,reply=true,domOptions}={}){
+ const dom=page('',domOptions); const sent=[]; let changed;
  dom.window.chrome={runtime:{sendMessage:(m,cb)=>{sent.push(m.type); if(reply) cb(m.type==='sns:getState'?run:{ok:true});}},
-  storage:{local:{get:async()=>({sns_run:storageRun})},onChanged:{addListener:()=>{}}}};
+  storage:{local:{get:async()=>({sns_run:storageRun})},onChanged:{addListener:fn=>changed=fn}}};
  dom.window.eval(fs.readFileSync('content_progress.js','utf8'));
- return {dom,doc:dom.window.document,sent};
+ return {dom,doc:progressUi(dom),sent,fire:v=>changed({sns_run:{newValue:v}},'local')};
 }
 test('the progress card is restored at once from saved state on every page load, without an entrance animation', async()=>{
  const run={status:'running',runId:'r',currentIndex:1,startedAt:Date.now()-20000,jitterMs:[2000,5000],items:[{...modern('a','First'),keep:false,status:'done'},{...modern('b','Second'),keep:false,status:'inflight'},{...modern('c','Third'),keep:false,status:'pending'},{...modern('d','Kept one'),keep:true,status:'pending'}]};
  const {dom,doc}=progressPage(run,{reply:false}); // the background has not answered yet
- await tick(5);
- const panel=doc.querySelector('.sns-progress');
- assert.ok(panel,'drawn from chrome.storage.local within a few ms, not after a 400 ms delay');
+ const panel=await until(()=>doc.querySelector('.sns-progress'),'drawn from chrome.storage.local at once, not after a 400 ms delay',300);
  assert.ok(panel.classList.contains('sns-progress--restored'));
  assert.doesNotMatch(rule('.sns-progress'),/animation/,'no fade/slide-in to replay on each item');
  assert.match(doc.querySelector('.sns-progress__count').textContent,/^2 of 3$/);
@@ -615,8 +678,7 @@ test('manifest injects the progress card at document_start without changing matc
 test('the finish summary lists what was cancelled, kept and failed, and links to Amazon to double-check', async()=>{
  const run={status:'done',runId:'r',currentIndex:2,items:[{...modern('a','Paper towels'),keep:false,status:'done'},{...modern('b','Coffee'),keep:true,status:'pending'},{...modern('c','Dish soap'),keep:false,status:'failed',error:'No confirmation shown'}]};
  const {dom,doc,sent}=progressPage(run);
- await tick(10);
- const panel=doc.querySelector('.sns-progress');
+ const panel=await until(()=>doc.querySelector('.sns-progress'),'finish summary drawn');
  assert.match(doc.querySelector('.sns-progress__title').textContent,/1 cancelled, 1 kept, 1 failed/);
  const sections=[...panel.querySelectorAll('details.sns-sum')].map(d=>d.querySelector('summary').textContent);
  assert.deepEqual(sections,['Needs attention (1)','Cancelled (1)','Kept (1)']);
@@ -625,8 +687,8 @@ test('the finish summary lists what was cancelled, kept and failed, and links to
  const link=doc.getElementById('sns-check-amazon');
  assert.equal(link.getAttribute('href'),'https://www.amazon.com/auto-deliveries/subscriptionList');
  assert.equal(link.getAttribute('target'),'_blank'); assert.match(link.getAttribute('rel'),/noopener/);
- doc.getElementById('sns-dismiss').click(); await tick(5);
- assert.ok(sent.includes('sns:reset'),'Done clears the summary');
+ doc.getElementById('sns-dismiss').click();
+ await until(()=>sent.includes('sns:reset'),'Done clears the summary');
  dom.window.close();
 });
 test('time left reads naturally', ()=>{
@@ -645,11 +707,71 @@ test('time left reads naturally', ()=>{
 test('popup and options use plain labels and show the new version', async()=>{
  const popup=fs.readFileSync('popup.html','utf8');
  assert.match(popup,/How it works/); assert.match(popup,/v2\.1\.2/);
- const dom=new JSDOM(popup.replace(/<script[^>]*><\/script>/g,''),{runScripts:'outside-only'});
+ const dom=track(new JSDOM(popup.replace(/<script[^>]*><\/script>/g,''),{runScripts:'outside-only'}));
  dom.window.chrome={runtime:{sendMessage:(m,reply)=>reply(m.type==='sns:getState'?{status:'done',items:[{...modern('a'),keep:false,status:'done'},{...modern('b'),keep:true,status:'pending'}]}:[])},storage:{onChanged:{addListener:()=>{}}},tabs:{}};
- dom.window.eval(fs.readFileSync('popup.js','utf8')); await tick(10);
+ dom.window.eval(fs.readFileSync('popup.js','utf8'));
+ await until(()=>/Last run/.test(dom.window.document.getElementById('status-text').textContent),'popup status');
  assert.equal(dom.window.document.getElementById('status-text').textContent,'Last run: 1 cancelled, 1 kept');
  dom.window.close();
  const options=fs.readFileSync('options.html','utf8');
  assert.match(options,/<label class="field-heading" for="reason">/); assert.match(options,/v2\.1\.2/);
+});
+
+// ---------- v2.1.2 review fixes ----------
+test('"Rescan" on the finish summary clears it before reloading, so the page scans instead of showing the summary again', async()=>{
+ // jsdom can't navigate: it reports the attempt on the virtual console instead.
+ const { VirtualConsole } = require('jsdom');
+ const events=[], vc=new VirtualConsole();
+ vc.on('jsdomError',e=>{ if(/navigation/i.test(e.message)) events.push('navigate'); });
+ const run={status:'done',runId:'r',currentIndex:0,items:[{...modern('a','Paper towels'),keep:false,status:'done'}]};
+ // A run can end on any subscription page; jsdom only reports navigation to a different URL.
+ const {dom,doc,sent}=progressPage(run,{domOptions:{virtualConsole:vc,url:'https://www.amazon.com/auto-deliveries/subscriptionList?ref=finished'}});
+ (await until(()=>doc.getElementById('sns-rescan-after'),'finish summary drawn')).click();
+ await until(()=>events.includes('navigate'),'page reload after the reset');
+ assert.deepEqual(sent.filter(t=>t==='sns:reset'),['sns:reset'],'the finished run is reset first');
+ dom.window.close();
+});
+test('progress card keeps keyboard focus on its controls and announces changes through a persistent live region', async()=>{
+ const run=(status)=>({status,runId:'r',currentIndex:0,items:[{...modern('x','Coffee pods'),keep:false,status:'inflight'},{...modern('y','Dish soap'),keep:false,status:'pending'}]});
+ const {dom,doc,fire}=progressPage(run('running'));
+ const live=await until(()=>{ const el=doc.querySelector('[role="status"][aria-live="polite"]'); return el&&/Cancelling Coffee pods/.test(el.textContent)&&el; },'live region announces the item');
+ assert.equal(doc.querySelectorAll('[aria-live]').length,1,'only one live region');
+ doc.getElementById('sns-pause').focus();
+ fire(run('paused'));
+ await until(()=>doc.getElementById('sns-resume'),'paused card rendered');
+ assert.equal(doc.activeElement?.id,'sns-resume','focus moves from Pause to Resume, not to the page');
+ assert.equal(doc.querySelector('[role="status"][aria-live="polite"]'),live,'same live region element');
+ assert.match(live.textContent,/paused/i);
+ fire({...run('done'),items:run('done').items.map(i=>({...i,status:'done'}))});
+ await until(()=>/Finished: 2 cancelled/.test(live.textContent),'finish announced');
+ dom.window.close();
+});
+test('a confirm dialog closed because choices changed elsewhere leaves no key handler behind', async()=>{
+ const {local}=uiStore({panelOpen:true,howSeen:true});
+ let current;
+ const {dom,doc,replied,fire}=managerWith(local,m=>{ if(m.type==='sns:scanComplete'){ const r=reviewing(m.items); current=r.run; return r; } return idleHandler(m); });
+ await settled(doc);
+ doc.querySelector('.sns-item').click();
+ // Until the background acknowledges the write, an echo is treated as stale.
+ await until(()=>replied.includes('sns:setKeep'),'keep write acknowledged');
+ doc.getElementById('sns-preview').click();
+ assert.ok(doc.getElementById('sns-modal'));
+ fire({...current,items:current.items.map(i=>({...i,keep:false}))}); // changed in another tab
+ assert.equal(doc.getElementById('sns-modal'),null,'stale dialog is closed');
+ const search=doc.getElementById('sns-search'); search.focus();
+ doc.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+ assert.equal(doc.activeElement,search,'Escape no longer yanks focus to the panel footer');
+ dom.window.close();
+});
+test('the confirm dialog traps Tab inside the shadow root', async()=>{
+ const {local}=uiStore({panelOpen:true,howSeen:true});
+ const {dom,doc}=managerWith(local,idleHandler); await settled(doc);
+ doc.querySelector('.sns-item').click();
+ doc.getElementById('sns-preview').click();
+ const confirm=doc.getElementById('sns-confirm-run'); confirm.focus();
+ const ev=new dom.window.KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true});
+ doc.dispatchEvent(ev);
+ assert.equal(ev.defaultPrevented,true);
+ assert.equal(doc.activeElement,doc.getElementById('sns-modal').querySelector('summary'),'wraps to the first control');
+ dom.window.close();
 });
