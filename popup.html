@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Subscribe &amp; Save Bulk Canceller</title>
+  <title>Subscription Bulk Canceller</title>
   <style>
     :root {
       --surface: #ffffff;
@@ -82,6 +82,8 @@
     .status-dot.running { background: var(--red); animation: blink 1.2s ease-in-out infinite; }
     .status-dot.paused { background: var(--amber); }
     .status-dot.done { background: var(--green); }
+    .status-dot.loading { background: var(--text-3); animation: blink 1.2s ease-in-out infinite; }
+    .status-dot.error { background: var(--red); }
     @keyframes blink {
       0%, 100% { opacity: 1; }
       50% { opacity: 0.3; }
@@ -145,6 +147,8 @@
       text-align: center;
     }
     .btn:active { transform: translateY(1px); }
+    .btn--small { min-height: 0; width: auto; padding: 5px 12px; margin-top: 8px; font-size: 12.5px; }
+    @media (prefers-reduced-motion: reduce) { .status-dot.running, .status-dot.loading { animation: none; } }
     .btn--primary {
       background: var(--text);
       color: #ffffff;
@@ -257,13 +261,15 @@
 <body>
 
   <header class="nameplate">
-    <div class="nameplate__brand">Subscribe <span class="amp">&amp;</span> Save</div>
-    <div class="nameplate__vol">Bulk Canceller</div>
+    <div class="nameplate__brand">Subscription Bulk Canceller</div>
   </header>
 
   <section class="status">
-    <div class="status-dot idle" id="status-dot"></div>
-    <div id="status-text">Loading…</div>
+    <div class="status-dot idle" id="status-dot" aria-hidden="true"></div>
+    <div>
+      <div id="status-text" role="status" aria-live="polite">Loading…</div>
+      <button class="btn btn--ghost btn--small" id="btn-retry" hidden>Try again</button>
+    </div>
   </section>
 
   <section class="stats" id="stats" hidden>
@@ -305,7 +311,7 @@
 
   <footer class="colophon">
     <a class="opts-link" href="#" id="options-link">Settings</a>
-    <span class="colophon-mark">v2.1</span>
+    <span class="colophon-mark">v2.1.1</span>
   </footer>
 
   <script src="popup.js"></script>

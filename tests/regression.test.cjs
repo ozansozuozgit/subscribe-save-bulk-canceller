@@ -200,11 +200,279 @@ test('open review reflects restored choices without rebuilding acknowledged loca
  await new Promise(resolve=>setImmediate(resolve));
  const row=dom.window.document.querySelector('#sns-list .sns-item');
  row.click();
- await new Promise(resolve=>setImmediate(resolve));
+ // Choices are written after a 150 ms debounce; wait until the toggle is acknowledged.
+ await new Promise(resolve=>setTimeout(resolve,250));
  assert.equal(dom.window.document.querySelector('#sns-stat-cancel').textContent,'1');
  assert.equal(dom.window.document.querySelector('#sns-list .sns-item'),row);
  current={...current,items:current.items.map(item=>({...item,keep:true}))};
  changed({sns_run:{newValue:current}},'local');
  assert.equal(dom.window.document.querySelector('#sns-stat-cancel').textContent,'0');
+ dom.window.close();
+});
+
+// ---------- Settings defaults, popup links, progress controls, confirm button ----------
+test('fresh install and getOptions use the shared 2–5 s pacing default', async()=>{
+ const { DEFAULT_OPTIONS } = globalThis.SNSState;
+ assert.deepEqual(DEFAULT_OPTIONS.jitterMs,[2000,5000]);
+ const storage={}; let handler, installed;
+ const context={console,URL,crypto:require('node:crypto').webcrypto,setTimeout:()=>{},SNSState:globalThis.SNSState,
+  chrome:{storage:{local:{get:async keys=>Object.fromEntries((Array.isArray(keys)?keys:[keys]).map(k=>[k,structuredClone(storage[k])])),set:async p=>Object.assign(storage,structuredClone(p))}},
+  runtime:{onMessage:{addListener:fn=>handler=fn},onInstalled:{addListener:fn=>installed=fn}},tabs:{},notifications:{}}};
+ vm.runInNewContext(fs.readFileSync('bg.js','utf8').replace("import './state.js';",''),context);
+ const opts=await new Promise(r=>handler({type:'sns:getOptions'},{},r));
+ assert.deepEqual([...opts.jitterMs],[2000,5000]); assert.equal(opts.reason,DEFAULT_OPTIONS.reason);
+ await installed();
+ assert.deepEqual(storage.sns_options.jitterMs,[2000,5000]);
+});
+test('Settings "Restore defaults" saves exactly the shared defaults', async()=>{
+ const html=fs.readFileSync('options.html','utf8');
+ assert.ok(html.indexOf('src="state.js"')>=0 && html.indexOf('src="state.js"')<html.indexOf('src="options.js"'),'options.html loads state.js first');
+ const dom=new JSDOM(html.replace(/<script[^>]*><\/script>/g,''),{runScripts:'outside-only'});
+ const sent=[]; let stored={reason:'Other',jitterMs:[700,900]};
+ dom.window.chrome={runtime:{sendMessage:(m,reply)=>{sent.push(m); if(m.type==='sns:setOptions') stored={...stored,...m.options}; reply(m.type==='sns:getOptions'?stored:{ok:true});}}};
+ dom.window.eval(fs.readFileSync('state.js','utf8')); dom.window.eval(fs.readFileSync('options.js','utf8'));
+ await new Promise(r=>setTimeout(r,10));
+ assert.equal(dom.window.document.getElementById('jitter-min').value,'700');
+ dom.window.document.getElementById('reset').click();
+ await new Promise(r=>setTimeout(r,10));
+ const set=sent.find(m=>m.type==='sns:setOptions');
+ assert.deepEqual([...set.options.jitterMs],[...globalThis.SNSState.DEFAULT_OPTIONS.jitterMs]);
+ assert.equal(set.options.reason,globalThis.SNSState.DEFAULT_OPTIONS.reason);
+ assert.equal(dom.window.document.getElementById('jitter-min').value,'2000');
+ assert.equal(dom.window.document.getElementById('jitter-max').value,'5000');
+ dom.window.close();
+});
+test('popup "Open" links only ever point at amazon.com', async()=>{
+ const dom=new JSDOM(fs.readFileSync('popup.html','utf8').replace(/<script[^>]*><\/script>/g,''),{runScripts:'outside-only'});
+ const items=[{id:'a',title:'Bad link',status:'failed',keep:false,cancelUrl:'javascript:alert(1)'},
+  {id:'b',title:'Good link',status:'failed',keep:false,cancelUrl:'https://www.amazon.com/auto-deliveries/cancelSubscription?subscriptionId=b'}];
+ dom.window.chrome={runtime:{sendMessage:(m,reply)=>reply(m.type==='sns:getState'?{status:'done',items}:[])},storage:{onChanged:{addListener:()=>{}}},tabs:{}};
+ dom.window.eval(fs.readFileSync('popup.js','utf8'));
+ await new Promise(r=>setTimeout(r,10));
+ const links=[...dom.window.document.querySelectorAll('.fail-link')].map(a=>a.getAttribute('href'));
+ assert.deepEqual(links,['https://www.amazon.com/auto-deliveries/subscriptionList','https://www.amazon.com/auto-deliveries/cancelSubscription?subscriptionId=b']);
+ dom.window.close();
+});
+test('progress panel disables Skip while paused (background ignores it then)', async()=>{
+ const run=status=>({status,runId:'r',currentIndex:0,items:[{...modern('x'),keep:false,status:status==='paused'?'failed':'inflight'}]});
+ for (const [status,disabled] of [['paused',true],['running',false]]) {
+  const dom=page(''); let current=run(status);
+  dom.window.chrome={runtime:{sendMessage:(m,reply)=>reply(current)},storage:{onChanged:{addListener:()=>{}}}};
+  dom.window.eval(fs.readFileSync('content_progress.js','utf8'));
+  await new Promise(r=>setTimeout(r,500));
+  assert.equal(dom.window.document.getElementById('sns-skip').disabled,disabled,status);
+  dom.window.close();
+ }
+});
+test('double-clicking the confirm button starts only one run', async()=>{
+ const dom=page(`<div id="subscriptionsDesktopGridLayout">${tile('SNST0_A','First')}${tile('SNST0_B','Second')}</div>`);
+ dom.window.scrollTo=()=>{}; dom.window.SNSUtils.sleep=async()=>{};
+ let starts=0, finishStart;
+ dom.window.chrome={runtime:{sendMessage:(m,reply)=>{
+  if(m.type==='sns:scanComplete') return reply({ok:true,run:{status:'reviewing',items:m.items.map(i=>({...i,keep:false,status:'pending'}))}});
+  if(m.type==='sns:startRun'){starts++; finishStart=()=>reply({ok:false,error:'Navigation failed'}); return;}
+  reply(m.type==='sns:getState'?{status:'idle'}:{ok:true});
+ }},storage:{onChanged:{addListener:()=>{}}}};
+ dom.window.eval(fs.readFileSync('content_manager.js','utf8'));
+ for(let i=0;i<50&&!dom.window.document.querySelector('#sns-preview:not([disabled])');i++) await new Promise(r=>setTimeout(r,20));
+ dom.window.document.getElementById('sns-preview').click();
+ const confirm=dom.window.document.getElementById('sns-confirm-run');
+ confirm.click(); confirm.click();
+ await new Promise(r=>setTimeout(r,20));
+ assert.equal(starts,1); assert.equal(confirm.disabled,true);
+ finishStart(); await new Promise(r=>setTimeout(r,20));
+ assert.equal(confirm.disabled,false,'re-enabled after an error so the user can retry');
+ assert.match(dom.window.document.getElementById('sns-modal-error').textContent,/Navigation failed/);
+ dom.window.close();
+});
+
+// ---------- Startup flicker, loading/error states, stability (v2.1.1 round 3) ----------
+const tick=(ms=0)=>new Promise(r=>setTimeout(r,ms));
+function managerPage(tiles, handler, { scanDelay=0 } = {}) {
+ const dom=page(`<div id="subscriptionsDesktopGridLayout">${tiles}</div>`);
+ dom.window.scrollTo=()=>{}; dom.window.SNSUtils.sleep=async()=>{};
+ const sent=[]; let changed;
+ dom.window.chrome={runtime:{sendMessage:(m,reply)=>{sent.push(m); const r=handler(m,reply); if(r!==undefined) setTimeout(()=>reply(r),m.type==='sns:scanComplete'?scanDelay:0);}},storage:{onChanged:{addListener:fn=>changed=fn}}};
+ dom.window.eval(fs.readFileSync('content_manager.js','utf8'));
+ return {dom,sent,doc:dom.window.document,fire:v=>changed({sns_run:{newValue:v}},'local')};
+}
+const reviewing=(items)=>({ok:true,run:{status:'reviewing',items:reconcile(items,[])}});
+
+test('while scanning the panel shows a loading state, never "No subscriptions found"', async()=>{
+ const {dom,doc}=managerPage(tile('SNST0_A','First'),(m)=>m.type==='sns:scanComplete'?reviewing(m.items):(m.type==='sns:getState'?{status:'idle'}:{ok:true}),{scanDelay:60});
+ await tick(20);
+ const card=doc.querySelector('.sns-card');
+ assert.ok(doc.querySelector('.sns-skeleton'),'skeleton rows while loading');
+ assert.equal(doc.querySelector('.sns-empty'),null,'no empty state during the scan');
+ assert.equal(card.getAttribute('aria-busy'),'true');
+ assert.equal(doc.getElementById('sns-scan-note').hidden,false);
+ assert.match(doc.getElementById('sns-scan-note').getAttribute('aria-live'),/polite/);
+ await tick(120);
+ assert.equal(doc.querySelectorAll('.sns-item').length,1);
+ assert.equal(doc.querySelector('.sns-card'),card,'the card element (and its entrance animation) is mounted once');
+ assert.equal(card.getAttribute('aria-busy'),'false');
+ assert.equal(doc.getElementById('sns-scan-note').hidden,true);
+ dom.window.close();
+});
+test('an empty scan shows the empty state with a working "Scan again"', async()=>{
+ let scans=0;
+ const {dom,doc}=managerPage('',(m)=>{ if(m.type==='sns:scanComplete'){scans++; return reviewing(m.items);} return m.type==='sns:getState'?{status:'idle'}:{ok:true}; });
+ await tick(30);
+ assert.ok(doc.querySelector('.sns-empty'));
+ doc.getElementById('sns-retry').click();
+ await tick(30);
+ assert.equal(scans,2);
+ dom.window.close();
+});
+test('an unreachable extension shows an error with retry instead of hanging in "Scanning"', async()=>{
+ let fail=true;
+ const {dom,doc}=managerPage(tile('SNST0_A','First'),(m)=>{
+  if(m.type==='sns:scanComplete'){ if(fail) throw new Error('Extension context invalidated.'); return reviewing(m.items); }
+  return m.type==='sns:getState'?{status:'idle'}:{ok:true};
+ });
+ await tick(30);
+ assert.ok(doc.querySelector('.sns-empty--error'),'error state shown');
+ assert.match(doc.getElementById('sns-error-msg').textContent,/reload|reach/i);
+ assert.equal(doc.querySelector('.sns-card').getAttribute('aria-busy'),'false');
+ fail=false; doc.getElementById('sns-retry').click();
+ await tick(30);
+ assert.equal(doc.querySelectorAll('.sns-item').length,1);
+ dom.window.close();
+});
+test('a background error during scan is shown, not a list of unsaved items', async()=>{
+ const {dom,doc}=managerPage(tile('SNST0_A','First'),(m)=>m.type==='sns:scanComplete'?{ok:false,error:'A cancellation run is already active.'}:(m.type==='sns:getState'?{status:'idle'}:{ok:true}));
+ await tick(30);
+ assert.equal(doc.querySelectorAll('.sns-item').length,0);
+ assert.match(doc.getElementById('sns-error-msg').textContent,/already active/);
+ dom.window.close();
+});
+test('rows are reused across filters, echoes and toggles (thumbnails never reload)', async()=>{
+ let current;
+ const {dom,doc,fire}=managerPage(tile('SNST0_A','First')+tile('SNST0_B','Second'),(m)=>{
+  if(m.type==='sns:scanComplete'){ const r=reviewing(m.items); current=r.run; return r; }
+  return m.type==='sns:getState'?{status:'idle'}:{ok:true};
+ });
+ await tick(30);
+ const rows=[...doc.querySelectorAll('.sns-item')], imgs=rows.map(r=>r.querySelector('img,.sns-item__thumb--placeholder'));
+ doc.querySelector('.sns-filter[data-filter="cancel"]').click();
+ assert.equal(doc.querySelectorAll('.sns-item').length,0);
+ doc.querySelector('.sns-filter[data-filter="all"]').click();
+ fire(current); // background echo with identical choices
+ const after=[...doc.querySelectorAll('.sns-item')];
+ assert.equal(after.length,rows.length);
+ after.forEach((r,i)=>{ assert.equal(r,rows[i],'same row element'); assert.equal(r.querySelector('img,.sns-item__thumb--placeholder'),imgs[i],'same thumbnail element'); });
+ dom.window.close();
+});
+test('rapid toggles are written once, and an older echo does not undo newer clicks', async()=>{
+ let current;
+ const {dom,doc,sent,fire}=managerPage(tile('SNST0_A','First')+tile('SNST0_B','Second')+tile('SNST0_C','Third'),(m)=>{
+  if(m.type==='sns:scanComplete'){ const r=reviewing(m.items); current=r.run; return r; }
+  return m.type==='sns:getState'?{status:'idle'}:{ok:true};
+ });
+ await tick(30);
+ const rows=()=>[...doc.querySelectorAll('.sns-item')];
+ rows()[0].click(); rows()[1].click(); rows()[2].click();
+ assert.equal(doc.getElementById('sns-stat-cancel').textContent,'3');
+ // An echo of the state before these clicks arrives while the write is pending.
+ fire(current);
+ assert.equal(doc.getElementById('sns-stat-cancel').textContent,'3','older echo must not revert local clicks');
+ assert.equal(sent.filter(m=>m.type==='sns:setKeep').length,0,'debounced');
+ await tick(250);
+ const writes=sent.filter(m=>m.type==='sns:setKeep');
+ assert.equal(writes.length,1); assert.deepEqual(writes[0].keepIds,[]);
+ dom.window.close();
+});
+test('starting a run flushes pending choices first and shows a busy confirm button', async()=>{
+ let finishStart;
+ const {dom,doc,sent}=managerPage(tile('SNST0_A','First')+tile('SNST0_B','Second'),(m,reply)=>{
+  if(m.type==='sns:scanComplete') return reviewing(m.items);
+  if(m.type==='sns:startRun'){ finishStart=()=>reply({ok:true}); return undefined; }
+  return m.type==='sns:getState'?{status:'idle'}:{ok:true};
+ });
+ await tick(30);
+ doc.querySelector('.sns-item').click();
+ doc.getElementById('sns-preview').click();
+ doc.getElementById('sns-confirm-run').click();
+ await tick(10);
+ const types=sent.map(m=>m.type).filter(t=>t==='sns:setKeep'||t==='sns:startRun');
+ assert.deepEqual(types,['sns:setKeep','sns:startRun'],'choices are saved before the run starts');
+ assert.deepEqual(sent.find(m=>m.type==='sns:setKeep').keepIds,['SNST0_B']);
+ const btn=doc.getElementById('sns-confirm-run');
+ assert.equal(btn.getAttribute('aria-busy'),'true'); assert.match(btn.textContent,/Starting/); assert.ok(btn.querySelector('.sns-spinner'));
+ finishStart(); await tick(10);
+ await tick(250);
+ assert.equal(sent.filter(m=>m.type==='sns:setKeep').length,1,'no second, late write after the flush');
+ dom.window.close();
+});
+test('content scripts boot once even if injected twice', async()=>{
+ const {dom,doc}=managerPage(tile('SNST0_A','First'),(m)=>m.type==='sns:scanComplete'?reviewing(m.items):(m.type==='sns:getState'?{status:'idle'}:{ok:true}));
+ dom.window.eval(fs.readFileSync('content_manager.js','utf8'));
+ await tick(30);
+ assert.equal(doc.querySelectorAll('#sns-root').length,1); assert.equal(doc.querySelectorAll('.sns-card').length,1);
+ dom.window.close();
+});
+test('progress panel updates in place, renders once per frame, and its buttons still work', async()=>{
+ const dom=page(''); const sent=[]; let changed;
+ const run=(i)=>({status:'running',runId:'r',currentIndex:i,items:[0,1,2].map(k=>({...modern('x'+k,'Item '+k),keep:false,status:k<i?'done':k===i?'inflight':'pending'}))});
+ dom.window.chrome={runtime:{sendMessage:(m,reply)=>{sent.push(m.type); reply(m.type==='sns:getState'?run(0):{ok:true});}},storage:{onChanged:{addListener:fn=>changed=fn}}};
+ dom.window.eval(fs.readFileSync('content_progress.js','utf8'));
+ await tick(450);
+ const panel=dom.window.document.querySelector('.sns-progress');
+ assert.ok(panel);
+ let writes=0; new dom.window.MutationObserver(()=>writes++).observe(panel,{childList:true});
+ changed({sns_run:{newValue:run(1)}},'local'); changed({sns_run:{newValue:run(2)}},'local');
+ await tick(40);
+ assert.equal(dom.window.document.querySelector('.sns-progress'),panel,'same element, no re-entrance animation');
+ assert.equal(writes,1,'two writes in one frame render once');
+ assert.match(panel.textContent,/Item 2/);
+ dom.window.document.getElementById('sns-pause').click();
+ await tick(5);
+ assert.ok(sent.includes('sns:pause'));
+ dom.window.close();
+});
+test('progress panel explains a lost connection after the extension is reloaded', async()=>{
+ const dom=page(''); let alive=true;
+ const run={status:'running',runId:'r',currentIndex:0,items:[{...modern('x'),keep:false,status:'inflight'}]};
+ dom.window.chrome={runtime:{sendMessage:(m,reply)=>{ if(!alive) throw new Error('Extension context invalidated.'); reply(run); }},storage:{onChanged:{addListener:()=>{}}}};
+ dom.window.eval(fs.readFileSync('content_progress.js','utf8'));
+ await tick(450);
+ alive=false;
+ dom.window.document.getElementById('sns-pause').click();
+ await tick(10);
+ assert.match(dom.window.document.querySelector('.sns-progress').textContent,/Reload the page/);
+ dom.window.close();
+});
+test('a worker restart between items pauses the stalled run; resume continues and clears the note', async()=>{
+ const items=[{...modern('a'),keep:false,status:'done',attempts:1},{...modern('b'),keep:false,status:'pending'}];
+ const w=await worker({sns_run:{status:'running',runId:'r',items,currentIndex:0,tabId:7}});
+ await tick(5);
+ assert.equal(w.storage.sns_run.status,'paused');
+ assert.match(w.storage.sns_run.pausedReason,/restarted/);
+ const r=await w.send('sns:resume');
+ assert.equal(w.storage.sns_run.status,'running'); assert.equal(w.storage.sns_run.currentIndex,1);
+ assert.equal(w.storage.sns_run.pausedReason,undefined); assert.ok(r.ok!==false);
+});
+test('a worker restart with an item in flight leaves the run alone', async()=>{
+ const items=[{...modern('a'),keep:false,status:'inflight',attempts:1}];
+ const w=await worker({sns_run:{status:'running',runId:'r',items,currentIndex:0,tabId:7}});
+ await tick(5);
+ assert.equal(w.storage.sns_run.status,'running');
+ assert.equal(w.storage.sns_run.pausedReason,undefined);
+});
+test('popup renders once after reading state, and offers retry when the background is unreachable', async()=>{
+ const dom=new JSDOM(fs.readFileSync('popup.html','utf8').replace(/<script[^>]*><\/script>/g,''),{runScripts:'outside-only'});
+ let up=false;
+ dom.window.chrome={runtime:{sendMessage:(m,reply)=>{ if(!up) throw new Error('Could not establish connection.'); reply(m.type==='sns:getState'?{status:'reviewing',items:[{...modern('a'),keep:false,status:'pending'}]}:[]); }},storage:{onChanged:{addListener:()=>{}}},tabs:{}};
+ dom.window.eval(fs.readFileSync('popup.js','utf8'));
+ await tick(10);
+ const d=dom.window.document;
+ assert.match(d.getElementById('status-text').textContent,/Couldn't read/);
+ assert.equal(d.getElementById('btn-retry').hidden,false);
+ assert.equal(d.body.getAttribute('aria-busy'),'false');
+ up=true; d.getElementById('btn-retry').click();
+ await tick(10);
+ assert.match(d.getElementById('status-text').textContent,/ready to review/);
+ assert.equal(d.getElementById('btn-retry').hidden,true);
+ assert.equal(d.getElementById('stat-active').textContent,'1');
  dom.window.close();
 });

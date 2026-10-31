@@ -57,5 +57,14 @@
     } catch (_) { return null; }
   }
 
-  globalThis.SNSState = { reconcile, remember, targetUrl };
+  // Single source of truth for settings defaults, shared by the service worker
+  // (bg.js) and the Settings page's "Restore defaults" (options.js).
+  // Pacing: a random 2–5 s pause between items gives each Amazon page time to load.
+  const DEFAULT_OPTIONS = {
+    reason: "I don't want this item anymore",
+    jitterMs: [2000, 5000],
+    maxAttempts: 1,
+  };
+
+  globalThis.SNSState = { reconcile, remember, targetUrl, DEFAULT_OPTIONS };
 })();

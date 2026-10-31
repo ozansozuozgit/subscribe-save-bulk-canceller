@@ -2,8 +2,18 @@
 
 const SUBS_URL = 'https://www.amazon.com/auto-deliveries/subscriptionList';
 
+// Resolves undefined (never throws) if the background can't be reached.
 function msg(type, payload) {
-  return new Promise((res) => chrome.runtime.sendMessage({ type, ...(payload || {}) }, res));
+  return new Promise((res) => {
+    try {
+      chrome.runtime.sendMessage({ type, ...(payload || {}) }, (reply) => {
+        void chrome.runtime.lastError;
+        res(reply);
+      });
+    } catch (_) {
+      res(undefined);
+    }
+  });
 }
 
 function summarize(items) {
@@ -25,6 +35,14 @@ function setText(id, text) {
 
 function escapeHtml(s) {
   return String(s || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// Only link to Amazon pages; anything else falls back to the subscriptions list.
+function safeAmazonUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.origin === 'https://www.amazon.com' ? u.href : SUBS_URL;
+  } catch (_) { return SUBS_URL; }
 }
 
 function render(run) {
@@ -90,7 +108,7 @@ function render(run) {
         <div class="fail-row">
           <span class="fail-icon">!</span>
           <span class="fail-title" title="${escapeHtml(i.error || '')}">${escapeHtml(i.title || 'Untitled')}</span>
-          <a class="fail-link" href="${escapeHtml(i.cancelUrl || i.editUrl || SUBS_URL)}" target="_blank" rel="noopener">Open</a>
+          <a class="fail-link" href="${escapeHtml(safeAmazonUrl(i.cancelUrl || i.editUrl))}" target="_blank" rel="noopener" aria-label="Open ${escapeHtml(i.title || 'subscription')} on Amazon">Open</a>
         </div>`
       )
       .join('');
@@ -99,10 +117,28 @@ function render(run) {
   }
 }
 
-async function init() {
-  const run = await msg('sns:getState');
+// Reads run state and saved choices together, then renders once, so the
+// popup doesn't grow in two steps while it opens.
+async function loadState() {
+  document.body.setAttribute('aria-busy', 'true');
+  document.getElementById('status-dot').className = 'status-dot loading';
+  setText('status-text', 'Reading saved choices…');
+  document.getElementById('btn-retry').hidden = true;
+  const [run, saved] = await Promise.all([msg('sns:getState'), msg('sns:getSaved')]);
+  document.body.setAttribute('aria-busy', 'false');
+  if (!run) {
+    document.getElementById('status-dot').className = 'status-dot error';
+    setText('status-text', "Couldn't read the extension's saved state.");
+    document.getElementById('btn-retry').hidden = false;
+    return;
+  }
   render(run);
-  renderSaved(await msg('sns:getSaved'));
+  renderSaved(saved);
+}
+
+async function init() {
+  document.getElementById('btn-retry').addEventListener('click', loadState);
+  await loadState();
 
   document.getElementById('btn-open').addEventListener('click', async () => {
     const tabs = await chrome.tabs.query({ url: 'https://www.amazon.com/*', currentWindow: true });

@@ -1,4 +1,4 @@
-// Runs on the Subscribe & Save manager pages.
+// Runs on Amazon's Subscribe & Save manager pages.
 // Scans the page, renders the review panel (bottom-right), and on confirm
 // kicks off the run via the background worker.
 
@@ -20,12 +20,35 @@
     query: '',
     scanning: false,
     scanNote: '',
+    error: null,         // message shown in the error state (scan failed / extension unreachable)
     runStatus: 'idle',   // mirrors bg.js run.status to know when to hide
   };
 
   // ---------- Helpers ----------
+  // Never throws: after the extension is reloaded or updated, this page's
+  // content script is orphaned and sendMessage throws "Extension context
+  // invalidated". Callers treat `undefined` as "couldn't reach the extension".
   function msg(type, payload) {
-    return new Promise((res) => chrome.runtime.sendMessage({ type, ...(payload || {}) }, res));
+    return new Promise((res) => {
+      try {
+        chrome.runtime.sendMessage({ type, ...(payload || {}) }, (reply) => {
+          void chrome.runtime.lastError; // read it so Chrome doesn't log "Unchecked runtime.lastError"
+          res(reply);
+        });
+      } catch (_) {
+        res(undefined);
+      }
+    });
+  }
+
+  function extensionReloaded() {
+    try { return !chrome.runtime?.id; } catch (_) { return true; }
+  }
+
+  function unreachableMessage() {
+    return extensionReloaded()
+      ? 'The extension was updated or reloaded. Reload this page to continue.'
+      : 'Could not reach the extension. Try again.';
   }
 
   function counts() {
@@ -130,9 +153,33 @@
       <div class="sns-empty">
         <div class="sns-empty__icon">${svg('box')}</div>
         <div class="sns-empty__title">No subscriptions found</div>
-        <div class="sns-empty__msg">If this looks wrong, try reloading the page. The extension scans active Subscribe &amp; Save items.</div>
+        <div class="sns-empty__msg">If this looks wrong, scan again or reload the page. The extension scans active Subscribe &amp; Save items.</div>
+        <button class="sns-btn sns-btn--ghost sns-empty__action" id="sns-retry">Scan again</button>
       </div>
     `;
+  }
+
+  function renderError() {
+    return `
+      <div class="sns-empty sns-empty--error" role="alert">
+        <div class="sns-empty__icon">${svg('close')}</div>
+        <div class="sns-empty__title">Couldn&rsquo;t load your subscriptions</div>
+        <div class="sns-empty__msg" id="sns-error-msg"></div>
+        <button class="sns-btn sns-btn--ghost sns-empty__action" id="sns-retry">Try again</button>
+      </div>
+    `;
+  }
+
+  // Placeholder rows with the same height as real rows, so the card doesn't
+  // jump when the list arrives.
+  function renderSkeleton() {
+    const row = `
+      <div class="sns-skeleton__row">
+        <div class="sns-skeleton__box"></div>
+        <div class="sns-skeleton__thumb"></div>
+        <div class="sns-skeleton__lines"><div></div><div></div></div>
+      </div>`;
+    return `<div class="sns-skeleton" aria-hidden="true">${row.repeat(6)}</div>`;
   }
 
   function renderItemRow(item) {
@@ -159,50 +206,73 @@
     `;
   }
 
-  function renderPanel() {
-    const root = ensureRoot();
-    if (state.runStatus === 'running' || state.runStatus === 'paused') {
-      // Don't show review panel while a run is in flight; progress UI handles it.
-      root.innerHTML = '';
-      return;
+  // ---------- Rendering ----------
+  // The panel is mounted once per "mode" and patched in place afterwards.
+  // Previously every state change rebuilt the whole card with innerHTML, which
+  // replayed the card's slide-in animation and re-created every thumbnail
+  // (the startup flicker). Now:
+  //   - the .sns-card element is created once and survives mode changes,
+  //   - its body is rebuilt only when the mode changes (loading → list …),
+  //   - counts, notes and labels are patched in place,
+  //   - list rows are keyed by id and reused (see renderList).
+  let mountedMode = null;
+
+  function panelMode() {
+    if (state.runStatus === 'running' || state.runStatus === 'paused') return 'hidden';
+    if (state.minimized) return 'minimized';
+    if (state.items.length) return 'list';
+    if (state.scanning) return 'loading';
+    if (state.error) return 'error';
+    return 'empty';
+  }
+
+  function ensureCard(root) {
+    let card = root.firstElementChild;
+    if (!card || !card.classList.contains('sns-card')) {
+      root.innerHTML = '<div class="sns-card" role="dialog" aria-label="Subscription Bulk Canceller"></div>';
+      card = root.firstElementChild;
     }
-    if (state.minimized) {
+    return card;
+  }
+
+  function mount(root, mode) {
+    rowCache.clear();
+    if (mode === 'hidden') { root.replaceChildren(); return; }
+    if (mode === 'minimized') {
       root.innerHTML = `
-        <div class="sns-pill" id="sns-restore">
+        <div class="sns-pill" id="sns-restore" role="button" tabindex="0">
           <div class="sns-pill__dot"></div>
-          <span><strong>${state.items.length}</strong> subscriptions · click to review</span>
+          <span><strong id="sns-pill-count"></strong> subscriptions · click to review</span>
         </div>`;
-      document.getElementById('sns-restore').addEventListener('click', () => {
-        state.minimized = false; renderPanel();
-      });
+      const restore = () => { state.minimized = false; renderPanel(); };
+      const pill = document.getElementById('sns-restore');
+      pill.addEventListener('click', restore);
+      pill.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); restore(); } });
       return;
     }
-    if (!state.items.length) {
-      root.innerHTML = `
-        <div class="sns-card">
-          ${renderHeader()}
-          <div class="sns-scan-note" id="sns-scan-note" ${state.scanning ? '' : 'hidden'}>${escapeHtml(state.scanNote || 'Scanning subscriptions…')}</div>
-          ${renderEmpty()}
-        </div>`;
-      bindHeader();
-      return;
-    }
-    const c = counts();
-    root.innerHTML = `
-      <div class="sns-card" role="dialog" aria-label="Subscribe and Save bulk canceller">
+    const card = ensureCard(root);
+    const note = '<div class="sns-scan-note" id="sns-scan-note" role="status" aria-live="polite" hidden><span class="sns-spinner" aria-hidden="true"></span><span id="sns-scan-note-text"></span></div>';
+    if (mode === 'loading') {
+      card.innerHTML = `${renderHeader()}${note}${renderSkeleton()}`;
+    } else if (mode === 'empty') {
+      card.innerHTML = `${renderHeader()}${note}${renderEmpty()}`;
+    } else if (mode === 'error') {
+      card.innerHTML = `${renderHeader()}${note}${renderError()}`;
+    } else {
+      card.innerHTML = `
         ${renderHeader()}
-        <div class="sns-scan-note" id="sns-scan-note" ${state.scanning ? '' : 'hidden'}>${escapeHtml(state.scanNote || 'Scanning subscriptions…')}</div>
+        ${note}
         <div class="sns-card__stats">
           <div class="sns-stat">
-            <div class="sns-stat__value" id="sns-stat-total">${c.total}</div>
+            <div class="sns-stat__value" id="sns-stat-total"></div>
             <div class="sns-stat__label">Active</div>
           </div>
           <div class="sns-stat">
-            <div class="sns-stat__value sns-stat__value--accent" id="sns-stat-cancel">${c.cancel}</div>
+            <div class="sns-stat__value sns-stat__value--accent" id="sns-stat-cancel"></div>
             <div class="sns-stat__label">Will cancel</div>
           </div>
           <div class="sns-stat">
-            <div class="sns-stat__value sns-stat__value--keep" id="sns-stat-keep">${c.kept}</div>
+            <div class="sns-stat__value sns-stat__value--keep" id="sns-stat-keep"></div>
             <div class="sns-stat__label">Keep</div>
           </div>
         </div>
@@ -224,28 +294,101 @@
           <button class="sns-btn sns-btn--ghost" id="sns-rescan">Rescan</button>
           <button class="sns-btn sns-btn--primary" id="sns-preview" disabled></button>
         </div>
-      </div>
-    `;
+      `;
+      bindToolbar();
+      bindList();
+      document.getElementById('sns-rescan').addEventListener('click', doScan);
+      document.getElementById('sns-preview').addEventListener('click', openPreview);
+    }
     bindHeader();
-    bindToolbar();
-    bindList();
-    document.getElementById('sns-rescan').addEventListener('click', doScan);
-    document.getElementById('sns-preview').addEventListener('click', openPreview);
-    renderList(false);
-    updateCounts();
+    document.getElementById('sns-retry')?.addEventListener('click', doScan);
   }
 
-  // Rebuilds only the list contents; the surrounding card (header, stats,
-  // toolbar, search input) stays in the DOM, so focus and listeners survive.
+  // Idempotent: safe to call on every state change.
+  function renderPanel() {
+    const root = ensureRoot();
+    const mode = panelMode();
+    if (mode !== mountedMode) {
+      mount(root, mode);
+      mountedMode = mode;
+    }
+    if (mode === 'hidden') return;
+    if (mode === 'minimized') {
+      document.getElementById('sns-pill-count').textContent = String(state.items.length);
+      return;
+    }
+    const card = root.firstElementChild;
+    card.setAttribute('aria-busy', String(!!state.scanning));
+    const subtitle = card.querySelector('.sns-card__subtitle');
+    if (subtitle) subtitle.textContent = subtitleText();
+    const noteEl = document.getElementById('sns-scan-note');
+    if (noteEl) {
+      // In list mode a failed rescan is reported in the same strip, above the
+      // previous (still valid) list.
+      const showError = !state.scanning && !!state.error && mode === 'list';
+      noteEl.hidden = !state.scanning && !showError;
+      noteEl.classList.toggle('sns-scan-note--error', showError);
+      document.getElementById('sns-scan-note-text').textContent = showError
+        ? state.error
+        : state.scanNote || 'Loading your subscriptions…';
+    }
+    const rescan = document.getElementById('sns-rescan');
+    if (rescan) {
+      rescan.disabled = !!state.scanning;
+      rescan.textContent = state.scanning ? 'Scanning…' : 'Rescan';
+    }
+    if (mode === 'error') document.getElementById('sns-error-msg').textContent = state.error || '';
+    if (mode === 'list') {
+      renderList(true);
+      updateCounts();
+    }
+  }
+
+  // Keyed list rendering: each row element is built once per item and reused,
+  // so thumbnails never reload when the list is filtered, sorted, or updated.
+  // Keep/cancel state is applied to the reused row in place.
+  const rowCache = new Map(); // id -> { sig, el }
+  let emptyFilterEl = null;
+
+  function rowFor(item) {
+    const sig = JSON.stringify([item.title, item.image, item.nextDate, item.shippingSoon, item.shippingSoonest, item.needsReview]);
+    let hit = rowCache.get(item.id);
+    if (!hit || hit.sig !== sig) {
+      const t = document.createElement('template');
+      t.innerHTML = renderItemRow(item).trim();
+      hit = { sig, el: t.content.firstElementChild };
+      rowCache.set(item.id, hit);
+    }
+    hit.el.classList.toggle('sns-item--kept', !!item.keep);
+    hit.el.setAttribute('aria-pressed', String(!item.keep));
+    return hit.el;
+  }
+
   function renderList(preserveScroll = true) {
     const list = document.getElementById('sns-list');
     if (!list) return;
-    const prevScroll = preserveScroll ? list.scrollTop : 0;
     const visibleItems = sortItems(filteredItems());
-    list.innerHTML = visibleItems.length
-      ? visibleItems.map(renderItemRow).join('')
-      : '<div class="sns-list-empty">No items match this filter.</div>';
-    list.scrollTop = prevScroll;
+    let next;
+    if (visibleItems.length) {
+      next = visibleItems.map(rowFor);
+    } else {
+      if (!emptyFilterEl) {
+        emptyFilterEl = document.createElement('div');
+        emptyFilterEl.className = 'sns-list-empty';
+        emptyFilterEl.textContent = 'No items match this filter.';
+      }
+      next = [emptyFilterEl];
+    }
+    const current = [...list.children];
+    if (current.length !== next.length || current.some((el, i) => el !== next[i])) {
+      const prevScroll = list.scrollTop;
+      list.replaceChildren(...next);
+      list.scrollTop = preserveScroll ? prevScroll : 0;
+    } else if (!preserveScroll) {
+      list.scrollTop = 0;
+    }
+    const ids = new Set(state.items.map((i) => i.id));
+    for (const id of rowCache.keys()) if (!ids.has(id)) rowCache.delete(id);
   }
 
   function filterLabel(name) {
@@ -288,23 +431,21 @@
     return `<button class="sns-filter${active}" data-filter="${name}">${escapeHtml(label)}</button>`;
   }
 
-  function renderHeader() {
+  function subtitleText() {
     const n = state.items.length;
-    let subtitle;
-    if (state.runStatus === 'running' || state.runStatus === 'paused') {
-      subtitle = 'A cancellation run is in progress.';
-    } else if (n === 0) {
-      subtitle = 'A review of your recurring orders.';
-    } else if (n === 1) {
-      subtitle = 'One recurring order, ready to review.';
-    } else {
-      subtitle = `${n} subscriptions · choices saved in this browser.`;
-    }
+    if (state.runStatus === 'running' || state.runStatus === 'paused') return 'A cancellation run is in progress.';
+    if (state.scanning && n === 0) return 'Reading your subscriptions page…';
+    if (n === 0) return state.error ? 'Something went wrong.' : 'A review of your recurring orders.';
+    if (n === 1) return 'One recurring order, ready to review.';
+    return `${n} subscriptions · choices saved in this browser.`;
+  }
+
+  function renderHeader() {
     return `
       <div class="sns-card__header">
         <div class="sns-card__logo"></div>
-        <div class="sns-card__title">Subscribe &amp; Save</div>
-        <div class="sns-card__subtitle">${subtitle}</div>
+        <div class="sns-card__title">Subscription Bulk Canceller</div>
+        <div class="sns-card__subtitle">${escapeHtml(subtitleText())}</div>
         <button class="sns-iconbtn" id="sns-minimize" title="Minimize" aria-label="Minimize">${svg('minimize')}</button>
       </div>`;
   }
@@ -392,21 +533,41 @@
   }
 
   // Updates the scan-status strip without rebuilding the panel.
+  // Updates the scan-status strip in place (no rebuild).
   function setScanNote(note) {
     state.scanNote = note;
-    const el = document.getElementById('sns-scan-note');
-    if (!el) {
-      renderPanel();
-      return;
-    }
-    el.hidden = !state.scanning;
-    el.textContent = note || 'Scanning subscriptions…';
+    renderPanel();
   }
 
-  async function pushKeepToBg() {
-    const keepIds = state.items.filter((i) => i.keep).map((i) => i.id);
-    await msg('sns:setKeep', { keepIds });
+  // Keep/cancel choices are written to the background (and so to storage)
+  // at most once per 150 ms burst of clicks. `flushKeep()` sends immediately;
+  // it runs before a cancellation run starts and when the page is hidden.
+  const KEEP_DEBOUNCE_MS = 150;
+  let keepTimer = null;
+  let keepInFlight = 0;
+
+  function keepWritePending() {
+    return keepTimer !== null || keepInFlight > 0;
   }
+
+  async function flushKeep() {
+    clearTimeout(keepTimer);
+    keepTimer = null;
+    const keepIds = state.items.filter((i) => i.keep).map((i) => i.id);
+    keepInFlight++;
+    try {
+      await msg('sns:setKeep', { keepIds });
+    } finally {
+      keepInFlight--;
+    }
+  }
+
+  function pushKeepToBg() {
+    clearTimeout(keepTimer);
+    keepTimer = setTimeout(flushKeep, KEEP_DEBOUNCE_MS);
+  }
+
+  window.addEventListener('pagehide', () => { if (keepTimer !== null) flushKeep(); });
 
   function mergeItems(...groups) {
     const byKey = new Map();
@@ -470,7 +631,7 @@
       const sentinel = document.querySelector('#endOfGridDesktop[data-next-url], #endOfGridMobile[data-next-url]');
       const more = findLoadMoreControl();
       if (!more && !sentinel?.getAttribute('data-next-url')) break;
-      setScanNote(`Loading more subscriptions (${lastCount || 0} found)…`);
+      setScanNote(`Loading your subscriptions… (${lastCount || 0} found)`);
       if (sentinel?.getAttribute('data-next-url')) sentinel.scrollIntoView({ block: 'center' });
       else realClick(more);
       const deadline = Date.now() + 5000;
@@ -515,7 +676,7 @@
     while (url && pages < 8) {
       pages += 1;
       seenPages.add(url);
-      setScanNote(`Checking page ${pages + 1}…`);
+      setScanNote(`Loading your subscriptions… (page ${pages + 1}, ${items.length} found)`);
       try {
         const res = await fetch(url, { credentials: 'include' });
         if (!res.ok) break;
@@ -583,14 +744,23 @@
     modalEl.querySelector('.sns-modal-backdrop').addEventListener('click', close);
     document.getElementById('sns-cancel-modal').addEventListener('click', close);
     document.getElementById('sns-confirm-run').addEventListener('click', async () => {
+      const confirmBtn = document.getElementById('sns-confirm-run');
+      if (confirmBtn.disabled) return;
+      confirmBtn.disabled = true; // a second click must not queue a second start request
+      const idleLabel = confirmBtn.innerHTML;
+      confirmBtn.innerHTML = '<span class="sns-spinner sns-spinner--light" aria-hidden="true"></span>Starting…';
+      confirmBtn.setAttribute('aria-busy', 'true');
       const reason = document.getElementById('sns-reason-select').value;
       const err = document.getElementById('sns-modal-error');
       if (err) err.hidden = true;
-      await pushKeepToBg();
+      await flushKeep();
       const r = await msg('sns:startRun', { reason });
       if (!r?.ok) {
+        confirmBtn.disabled = false;
+        confirmBtn.innerHTML = idleLabel;
+        confirmBtn.removeAttribute('aria-busy');
         if (err) {
-          err.textContent = r?.error || 'Could not start cancellation.';
+          err.textContent = r?.error || (r === undefined ? unreachableMessage() : 'Could not start cancellation.');
           err.hidden = false;
         }
         return;
@@ -612,41 +782,56 @@
   async function doScan() {
     if (state.scanning || ['running', 'paused'].includes(state.runStatus)) return;
     state.scanning = true;
-    state.scanNote = 'Loading every visible subscription…';
+    state.error = null;
+    state.scanNote = 'Loading your subscriptions…';
     renderPanel();
-    const expanded = await expandCurrentPage();
-    const pageItems = await scanAdditionalPages(expanded);
-    // Amazon's React hydration + lazy-loaded images mean the first scan often
-    // finds tiles but with placeholder image src=""/data:. Keep retrying until
-    // we have items AND most of them have real product images, with a long
-    // upper bound so direct page-refresh (no popup nav) eventually settles.
-    let items = [];
-    let bestItems = pageItems || [];
-    const MAX_ATTEMPTS = 14;     // ~14 * 600ms = 8.4s max
-    const STEP_MS = 600;
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-      items = mergeItems(bestItems, scan());
-      if (items.length) {
-        const withImg = items.filter((i) => i.image).length;
-        // Remember the most-complete scan we've seen so far.
-        const prevWithImg = bestItems.filter((i) => i.image).length;
-        if (items.length > bestItems.length || withImg > prevWithImg) {
-          bestItems = items;
+    try {
+      const expanded = await expandCurrentPage();
+      const pageItems = await scanAdditionalPages(expanded);
+      // Amazon's React hydration + lazy-loaded images mean the first scan often
+      // finds tiles but with placeholder image src=""/data:. Keep retrying until
+      // we have items AND most of them have real product images, with a long
+      // upper bound so direct page-refresh (no popup nav) eventually settles.
+      let items = [];
+      let bestItems = pageItems || [];
+      const MAX_ATTEMPTS = 14;     // ~14 * 600ms = 8.4s max
+      const STEP_MS = 600;
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        items = mergeItems(bestItems, scan());
+        if (items.length) {
+          const withImg = items.filter((i) => i.image).length;
+          // Remember the most-complete scan we've seen so far.
+          const prevWithImg = bestItems.filter((i) => i.image).length;
+          if (items.length > bestItems.length || withImg > prevWithImg) {
+            bestItems = items;
+          }
+          // We're done as soon as every visible item has a real image.
+          if (withImg === items.length) break;
+          setScanNote(`Loading product images… (${items.length} found)`);
         }
-        // We're done as soon as every visible item has a real image.
-        if (withImg === items.length) break;
+        await sleep(STEP_MS);
       }
-      await sleep(STEP_MS);
+      const scanned = enrichItems(bestItems.length ? bestItems : items);
+      setScanNote(`Saving ${scanned.length} subscription${scanned.length === 1 ? '' : 's'}…`);
+      // Stay in the scanning state until the background has merged saved
+      // choices, so the list appears once, with the right keep/cancel marks.
+      const result = await msg('sns:scanComplete', { items: scanned });
+      if (result?.run) {
+        state.items = enrichItems(result.run.items.filter(item => item.status !== 'done'));
+        state.runStatus = result.run.status;
+      } else if (result === undefined) {
+        state.error = unreachableMessage();
+      } else {
+        state.error = result.error || 'The scan could not be saved.';
+      }
+    } catch (error) {
+      console.warn('SNS manager: scan failed', error);
+      state.error = `Scan failed: ${error?.message || error}`;
+    } finally {
+      state.scanning = false;
+      state.scanNote = '';
+      renderPanel();
     }
-    state.items = enrichItems(bestItems.length ? bestItems : items);
-    state.scanning = false;
-    state.scanNote = '';
-    const result = await msg('sns:scanComplete', { items: state.items });
-    if (result?.run) {
-      state.items = enrichItems(result.run.items.filter(item => item.status !== 'done'));
-      state.runStatus = result.run.status;
-    }
-    renderPanel();
   }
 
   async function init() {
@@ -659,28 +844,36 @@
     await doScan();
   }
 
-  // React to state changes (e.g., run finishes while we're on the manager page)
+  function sameChoices(a, b) {
+    if (a.length !== b.length) return false;
+    return a.every((item, i) => item.id === b[i].id && !!item.keep === !!b[i].keep &&
+      item.status === b[i].status && !!item.needsReview === !!b[i].needsReview);
+  }
+
+  // React to state changes (e.g., run finishes, or choices restored from the popup).
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local' || !changes.sns_run) return;
     const next = changes.sns_run.newValue;
     if (!next) return;
-    const previousStatus = state.runStatus;
     state.runStatus = next.status;
-    if (['idle', 'done', 'reviewing'].includes(state.runStatus)) {
-      if (!state.scanning) {
-        const items = enrichItems((next.items || []).filter(item => item.status !== 'done'));
-        // Local toggles are already rendered; don't reset their scroll/focus
-        // when the background acknowledges the same choices.
-        if (previousStatus === next.status && JSON.stringify(items) === JSON.stringify(state.items)) return;
-        state.items = items;
-        document.getElementById('sns-modal')?.remove();
-        renderPanel();
-      }
-    } else {
-      // Hide while running — progress panel takes over
-      const root = document.getElementById(ROOT_ID);
-      if (root) root.innerHTML = '';
+    if (['running', 'paused'].includes(next.status)) {
+      renderPanel(); // hides the card; the progress panel takes over
+      return;
     }
+    // A scan in progress will render the merged result itself.
+    if (state.scanning) return;
+    let items = enrichItems((next.items || []).filter(item => item.status !== 'done'));
+    if (keepWritePending()) {
+      // Our own newer choices haven't been written yet; this is an older echo.
+      // Keep showing the local choices, which is what storage will hold next.
+      const local = new Map(state.items.map((i) => [i.id, i.keep]));
+      items = items.map((i) => (local.has(i.id) ? { ...i, keep: local.get(i.id) } : i));
+    }
+    if (!sameChoices(items, state.items)) {
+      state.items = items;
+      document.getElementById('sns-modal')?.remove(); // choices changed elsewhere; the preview is stale
+    }
+    renderPanel();
   });
 
   // ---------- escape helpers ----------

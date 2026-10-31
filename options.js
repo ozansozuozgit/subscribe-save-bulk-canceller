@@ -7,13 +7,22 @@ const REASON_OPTIONS = [
   "I'm not using this product",
   'Other',
 ];
-const DEFAULTS = {
-  reason: REASON_OPTIONS[0],
-  jitterMs: [2000, 5000],
-};
+// Shared with bg.js via state.js so "Restore defaults" matches a fresh install.
+const { reason: DEFAULT_REASON, jitterMs: DEFAULT_JITTER } = globalThis.SNSState.DEFAULT_OPTIONS;
+const DEFAULTS = { reason: DEFAULT_REASON, jitterMs: [...DEFAULT_JITTER] };
 
+// Resolves undefined (never throws) if the background can't be reached.
 function msg(type, payload) {
-  return new Promise((res) => chrome.runtime.sendMessage({ type, ...(payload || {}) }, res));
+  return new Promise((res) => {
+    try {
+      chrome.runtime.sendMessage({ type, ...(payload || {}) }, (reply) => {
+        void chrome.runtime.lastError;
+        res(reply);
+      });
+    } catch (_) {
+      res(undefined);
+    }
+  });
 }
 
 function populateReason(current) {

@@ -1,5 +1,5 @@
 /* ============================================================
-   Subscribe & Save Bulk Canceller — injected UI
+   Subscription Bulk Canceller — injected UI
    Light, legibility-first design. System sans, white surfaces,
    red reserved for "will cancel" state and destructive actions.
    ============================================================ */
@@ -144,7 +144,7 @@
   line-height: 1;
 }
 .sns-card__logo::after {
-  content: "Bulk Canceller";
+  content: "Your Subscribe & Save items";
 }
 .sns-card__logo > * { display: none; }   /* hide JS-injected glyph */
 
@@ -847,3 +847,73 @@
   color: var(--text-2);
 }
 .sns-progress__summary strong { color: var(--text); font-weight: 600; }
+
+/* Disabled controls (e.g. Skip while paused, Confirm while a run is starting) */
+.sns-progress__controls button:disabled,
+.sns-btn--danger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ============================================================
+   Loading, empty and error states
+   ============================================================ */
+.sns-scan-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sns-scan-note--error {
+  background: var(--red-soft);
+  color: var(--red-deep);
+}
+.sns-scan-note--error .sns-spinner { display: none; }
+
+.sns-spinner {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  display: inline-block;
+  vertical-align: -2px;
+  animation: sns-spin 700ms linear infinite;
+}
+.sns-spinner--light { color: #ffffff; margin-right: 8px; }
+@keyframes sns-spin { to { transform: rotate(360deg); } }
+
+/* Skeleton rows match .sns-item geometry so the list drops in without a jump. */
+.sns-skeleton { flex: 1; overflow: hidden; }
+.sns-skeleton__row {
+  display: grid;
+  grid-template-columns: 22px 48px 1fr;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.sns-skeleton__box,
+.sns-skeleton__thumb,
+.sns-skeleton__lines > div {
+  background: linear-gradient(90deg, var(--surface-3) 0%, var(--surface-2) 50%, var(--surface-3) 100%);
+  background-size: 200% 100%;
+  animation: sns-shimmer 1.3s ease-in-out infinite;
+}
+.sns-skeleton__box { width: 20px; height: 20px; border-radius: 5px; }
+.sns-skeleton__thumb { width: 48px; height: 48px; border-radius: 7px; }
+.sns-skeleton__lines > div { height: 10px; border-radius: 5px; width: 70%; }
+.sns-skeleton__lines > div + div { margin-top: 8px; width: 35%; }
+@keyframes sns-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+
+.sns-empty__action { margin-top: 16px; cursor: pointer; }
+.sns-empty--error .sns-empty__icon { color: var(--red); background: var(--red-soft); border-color: var(--red-border); }
+
+.sns-btn:disabled { cursor: not-allowed; }
+.sns-btn--ghost:disabled { opacity: 0.6; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sns-card, .sns-progress, .sns-pill, .sns-modal, .sns-modal-backdrop { animation: none; }
+  .sns-skeleton__box, .sns-skeleton__thumb, .sns-skeleton__lines > div { animation: none; }
+  .sns-spinner { animation-duration: 1.6s; }
+}

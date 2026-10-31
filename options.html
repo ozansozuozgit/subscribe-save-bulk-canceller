@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Subscribe &amp; Save — Settings</title>
+  <title>Subscription Bulk Canceller — Settings</title>
   <style>
     :root {
       --surface: #ffffff;
@@ -220,8 +220,8 @@
 
   <div class="page">
     <header class="masthead">
-      <div class="eyebrow">Bulk Canceller — Settings</div>
-      <h1>Subscribe <span class="amp">&amp;</span> Save defaults</h1>
+      <div class="eyebrow">Subscription Bulk Canceller — Settings</div>
+      <h1>Cancellation defaults</h1>
       <p class="subtitle">
         Two settings shape every cancellation run. Set them once — you can still override the reason per run from the review panel.
       </p>
@@ -234,7 +234,7 @@
         <p class="field-hint">
           Amazon asks <em>why</em> on every cancellation. Pick the answer you'd otherwise type five times in a row.
         </p>
-        <select class="select" id="reason"></select>
+        <select class="select" id="reason" aria-label="Default cancellation reason"></select>
       </div>
     </section>
 
@@ -243,12 +243,12 @@
       <div class="field-body">
         <div class="field-heading">Pause between each item</div>
         <p class="field-hint">
-          We wait a random interval between cancellations so the run reads as human activity. <em>2,000–5,000 ms</em> is the comfortable range. Lower is faster; higher is safer.
+          The extension waits a short random interval between cancellations so each page has time to load. <em>2,000–5,000 ms</em> is a comfortable range. Lower is faster; higher is more reliable on slow connections.
         </p>
         <div class="row">
-          <input class="input" type="number" id="jitter-min" min="500" max="60000" step="100" />
+          <input class="input" type="number" id="jitter-min" min="500" max="60000" step="100" aria-label="Minimum pause in milliseconds" />
           <span class="dash">—</span>
-          <input class="input" type="number" id="jitter-max" min="500" max="60000" step="100" />
+          <input class="input" type="number" id="jitter-max" min="500" max="60000" step="100" aria-label="Maximum pause in milliseconds" />
         </div>
         <div class="row-cap">
           <span class="a">Minimum · ms</span>
@@ -260,15 +260,16 @@
     <div class="actions">
       <button class="btn btn--primary" id="save">Save settings</button>
       <button class="btn btn--ghost" id="reset">Restore defaults</button>
-      <span class="saved" id="saved">Saved</span>
+      <span class="saved" id="saved" role="status" aria-live="polite">Saved</span>
     </div>
   </div>
 
   <div class="colophon">
-    <span>Subscribe &amp; Save Bulk Canceller</span>
-    <span>v2.0</span>
+    <span>Subscription Bulk Canceller</span>
+    <span>v2.1.1</span>
   </div>
 
+  <script src="state.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

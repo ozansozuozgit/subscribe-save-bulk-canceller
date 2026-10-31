@@ -1,5 +1,5 @@
 import './state.js';
-const { reconcile, remember, targetUrl } = globalThis.SNSState;
+const { reconcile, remember, targetUrl, DEFAULT_OPTIONS } = globalThis.SNSState;
 const SAVED_KEY = 'sns_saved';
 const HISTORY_KEY = 'sns_history';
 
@@ -10,13 +10,7 @@ const HISTORY_KEY = 'sns_history';
 const KEY = 'sns_run';
 const OPTS_KEY = 'sns_options';
 
-const DEFAULT_OPTIONS = {
-  reason: "I don't want this item anymore",
-  // Short, human-paced gap between items. Kept non-zero so Amazon's session
-  // doesn't see machine-gun navigation. Tunable in Settings.
-  jitterMs: [600, 1200],
-  maxAttempts: 1,
-};
+// Settings defaults (reason, pacing) live in state.js so Settings can share them.
 
 const EMPTY_RUN = {
   status: 'idle', // idle | reviewing | previewing | running | paused | done
@@ -156,7 +150,7 @@ async function finishRun(run) {
     await chrome.notifications.create({
       type: 'basic',
       iconUrl: 'icons/128.png',
-      title: 'Subscribe & Save — Done',
+      title: 'Subscription Bulk Canceller — Done',
       message:
         `Cancelled ${summary.cancelled} of ${summary.cancelled + summary.failed + summary.skipped}` +
         (summary.failed ? ` · ${summary.failed} failed` : '') +
@@ -409,7 +403,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const items = cur.items.map((it, i) =>
           i === idx ? { ...it, status: 'inflight', error: undefined, attempts: (it.attempts || 0) + 1 } : it
         );
-        const run = { ...cur, status: 'running', items, currentIndex: idx };
+        const run = { ...cur, status: 'running', items, currentIndex: idx, pausedReason: undefined };
         await setRun(run);
         sendResponse(await navigateRun(run));
         return;
@@ -455,6 +449,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   });
   return true; // async
 });
+
+// ---------- Service-worker restart recovery ----------
+// The pause between items is a setTimeout inside this worker. If the worker
+// stops while it is pending (extension reloaded or updated mid-run, or Chrome
+// stopping an idle worker during a long pause), that timer is gone and a run
+// left "running" with nothing in flight would never advance; the progress
+// panel would say "Cancelling" forever. A freshly started worker cannot own
+// such a timer, so pause the run and let the user resume it. An item that is
+// in flight is left alone: its tab reports the result as before.
+async function recoverStalledRun() {
+  const stored = await chrome.storage.local.get(KEY);
+  const run = stored[KEY];
+  if (run?.status !== 'running') return;
+  if (run.items?.[run.currentIndex]?.status === 'inflight') return;
+  await setRun({
+    ...run,
+    status: 'paused',
+    pausedReason: 'The extension restarted between items. Press Resume to continue.',
+  });
+}
+messages = messages.then(recoverStalledRun).catch(error => console.error('SNS BG: recovery error', error));
 
 // On install: seed defaults
 chrome.runtime.onInstalled.addListener(async () => {
