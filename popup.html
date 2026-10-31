@@ -11,13 +11,13 @@
       --border-strong: #cdd2d8;
       --text: #191c20;
       --text-2: #5a626c;
-      --text-3: #8b929c;
-      --red: #d64533;
-      --red-deep: #b93424;
+      --text-3: #66707b;
+      --red: #c4382a;
+      --red-deep: #a32c20;
       --red-soft: #fdefed;
       --red-border: #f3cdc8;
-      --amber: #9a6b00;
-      --green: #1e7d47;
+      --amber: #8a5d00;
+      --green: #1b7342;
       --focus: #2563eb;
     }
 
@@ -255,6 +255,20 @@
       color: var(--text-3);
     }
 
+
+    /* ── How it works / backup ─────────────────────────── */
+    .how { padding: 12px 18px 14px; border-bottom: 1px solid var(--border); }
+    .how summary, .backup summary { cursor: pointer; font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+    .how ol { margin: 10px 0 0; padding: 0; list-style: none; counter-reset: step; display: grid; gap: 8px; }
+    .how li { counter-increment: step; position: relative; padding-left: 28px; font-size: 13px; color: var(--text-2); line-height: 1.45; }
+    .how li strong { color: var(--text); font-weight: 600; }
+    .how li::before { content: counter(step); position: absolute; left: 0; top: 0; width: 20px; height: 20px; border-radius: 50%; background: var(--text); color: #fff; font-size: 11.5px; font-weight: 700; display: grid; place-items: center; }
+    .backup { margin-top: 4px; }
+    .backup[open] summary { margin-bottom: 8px; }
+    .backup .btn { margin-top: 8px; }
+    .backup textarea { width: 100%; min-height: 70px; margin-top: 8px; border: 1px solid var(--border); border-radius: 8px; padding: 8px; font: 12px/1.4 ui-monospace, Menlo, monospace; }
+    .backup-hint { font-size: 12px; color: var(--text-2); }
+
     [hidden] { display: none !important; }
   </style>
 </head>
@@ -275,7 +289,7 @@
   <section class="stats" id="stats" hidden>
     <div class="stat">
       <div class="stat-value" id="stat-active">0</div>
-      <div class="stat-label">To cancel</div>
+      <div class="stat-label">Selected to cancel</div>
     </div>
     <div class="stat">
       <div class="stat-value" id="stat-cancelled">0</div>
@@ -287,16 +301,28 @@
     </div>
   </section>
 
+  <section class="how">
+    <details id="how" open>
+      <summary>How it works</summary>
+      <ol>
+        <li><strong>Pick what to keep.</strong> On your Subscribe &amp; Save page, open the small panel in the corner. Everything starts as Keep; click an item to switch it to Cancel.</li>
+        <li><strong>Review and confirm.</strong> You see exactly what will be cancelled and kept before anything happens.</li>
+        <li><strong>It cancels the rest, one at a time.</strong> At a human pace, using Amazon&rsquo;s own Cancel button. You can pause anytime.</li>
+      </ol>
+    </details>
+  </section>
+
   <section class="actions">
+    <button class="btn btn--primary" id="btn-open">Open my Subscribe &amp; Save page</button>
+    <button class="btn btn--ghost" id="btn-rescan" hidden>Rescan the page (keeps your choices)</button>
     <div id="saved-status" class="fail-hint" role="status"></div>
-    <button class="btn btn--primary" id="btn-open">Open subscriptions page</button>
-    <button class="btn btn--ghost" id="btn-rescan" hidden>Rescan with saved choices</button>
-    <button class="btn btn--ghost" id="btn-export">Export saved choices &amp; history</button>
-    <details>
-      <summary>Restore saved choices</summary>
-      <textarea id="import-data" aria-label="Saved choices JSON" style="width:100%;min-height:70px"></textarea>
+    <details class="backup">
+      <summary>Backup &amp; restore</summary>
+      <div class="backup-hint">Your choices and history stay in this browser. A backup file contains product names and subscription IDs, so keep it private.</div>
+      <button class="btn btn--ghost" id="btn-export">Download a backup</button>
+      <textarea id="import-data" aria-label="Backup to restore (paste the JSON here)" placeholder="Paste a backup here to restore it"></textarea>
       <button class="btn btn--ghost" id="btn-import">Restore choices</button>
-      <div id="import-result" role="status"></div>
+      <div id="import-result" class="backup-hint" role="status"></div>
     </details>
   </section>
 
@@ -306,12 +332,12 @@
       <span class="fail-count" id="fail-count">0</span>
     </div>
     <div class="failures" id="failures"></div>
-    <div class="fail-hint">Your choices and attempts are saved. Rescan to retry failed items. Check unconfirmed results on Amazon first.</div>
+    <div class="fail-hint">These were not confirmed as cancelled. Open each one on Amazon to check it, then rescan to try again. Your choices are saved.</div>
   </section>
 
   <footer class="colophon">
     <a class="opts-link" href="#" id="options-link">Settings</a>
-    <span class="colophon-mark">v2.1.1</span>
+    <span class="colophon-mark">v2.1.2 · runs only in this browser</span>
   </footer>
 
   <script src="popup.js"></script>

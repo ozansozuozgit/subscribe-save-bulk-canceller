@@ -13,6 +13,9 @@ function page(html) {
   for (const file of ['utils.js','selectors.js','scan.js']) dom.window.eval(fs.readFileSync(file,'utf8'));
   return dom;
 }
+// v2.1.2: the review panel starts collapsed. Tests that exercise the open
+// panel start with it open and the "How it works" explainer already seen.
+const openUi=()=>({get:async()=>({sns_ui:{panelOpen:true,howSeen:true}}),set:async()=>{}});
 function tile(id, title) { return `<div data-edit-url="/auto-deliveries/ajax/subscription/?subscriptionId=${id}&amp;subAsin=B012345678"><div><img alt="${title}" src="https://m.media-amazon.com/images/I/EXAMPLE._SS250_.jpg"><span class="a-truncate-full a-offscreen">${title}</span><span class="a-truncate-cut">${title.slice(0,8)}</span><span>Next delivery: Nov 20</span><span>1 unit every 2 months</span><div role="button" data-edit-link="true">Edit</div></div></div>`; }
 
 test('current Amazon attribute cards have stable IDs, correct titles and cancellation URLs', () => {
@@ -119,7 +122,7 @@ test('manager loads successive infinite-scroll batches and never follows footer 
  dom.window.HTMLElement.prototype.scrollIntoView=function(){ if(this.id==='endOfGridDesktop'){batches++; this.insertAdjacentHTML('beforebegin',tile(`SNST0_${batches}`,'Next product')); if(batches===2)this.removeAttribute('data-next-url');}};
  dom.window.document.querySelector('a').addEventListener('click',()=>footerClicks++);
  dom.window.scrollTo=()=>{}; dom.window.SNSUtils.sleep=async()=>{};
- dom.window.chrome={runtime:{sendMessage:(message,reply)=>{if(message.type==='sns:scanComplete'){scanned=message.items;reply({ok:true,run:{items:message.items,status:'reviewing'}});}else reply({status:'idle'});}},storage:{onChanged:{addListener:()=>{}}}};
+ dom.window.chrome={runtime:{sendMessage:(message,reply)=>{if(message.type==='sns:scanComplete'){scanned=message.items;reply({ok:true,run:{items:message.items,status:'reviewing'}});}else reply({status:'idle'});}},storage:{local:openUi(),onChanged:{addListener:()=>{}}}};
  dom.window.eval(fs.readFileSync('content_manager.js','utf8'));
  await new Promise(resolve=>setImmediate(resolve));
  assert.equal(batches,2); assert.equal(scanned.length,3); assert.equal(footerClicks,0); dom.window.close();
@@ -195,7 +198,7 @@ test('open review reflects restored choices without rebuilding acknowledged loca
    queueMicrotask(()=>changed({sns_run:{newValue:current}},'local'));
    reply({ok:true});
   } else reply({status:'idle'});
- }},storage:{onChanged:{addListener:fn=>changed=fn}}};
+ }},storage:{local:openUi(),onChanged:{addListener:fn=>changed=fn}}};
  dom.window.eval(fs.readFileSync('content_manager.js','utf8'));
  await new Promise(resolve=>setImmediate(resolve));
  const row=dom.window.document.querySelector('#sns-list .sns-item');
@@ -272,7 +275,7 @@ test('double-clicking the confirm button starts only one run', async()=>{
   if(m.type==='sns:scanComplete') return reply({ok:true,run:{status:'reviewing',items:m.items.map(i=>({...i,keep:false,status:'pending'}))}});
   if(m.type==='sns:startRun'){starts++; finishStart=()=>reply({ok:false,error:'Navigation failed'}); return;}
   reply(m.type==='sns:getState'?{status:'idle'}:{ok:true});
- }},storage:{onChanged:{addListener:()=>{}}}};
+ }},storage:{local:openUi(),onChanged:{addListener:()=>{}}}};
  dom.window.eval(fs.readFileSync('content_manager.js','utf8'));
  for(let i=0;i<50&&!dom.window.document.querySelector('#sns-preview:not([disabled])');i++) await new Promise(r=>setTimeout(r,20));
  dom.window.document.getElementById('sns-preview').click();
@@ -292,10 +295,13 @@ function managerPage(tiles, handler, { scanDelay=0 } = {}) {
  const dom=page(`<div id="subscriptionsDesktopGridLayout">${tiles}</div>`);
  dom.window.scrollTo=()=>{}; dom.window.SNSUtils.sleep=async()=>{};
  const sent=[]; let changed;
- dom.window.chrome={runtime:{sendMessage:(m,reply)=>{sent.push(m); const r=handler(m,reply); if(r!==undefined) setTimeout(()=>reply(r),m.type==='sns:scanComplete'?scanDelay:0);}},storage:{onChanged:{addListener:fn=>changed=fn}}};
+ dom.window.chrome={runtime:{sendMessage:(m,reply)=>{sent.push(m); const r=handler(m,reply); if(r!==undefined) setTimeout(()=>reply(r),m.type==='sns:scanComplete'?scanDelay:0);}},storage:{local:openUi(),onChanged:{addListener:fn=>changed=fn}}};
  dom.window.eval(fs.readFileSync('content_manager.js','utf8'));
  return {dom,sent,doc:dom.window.document,fire:v=>changed({sns_run:{newValue:v}},'local')};
 }
+// Waits until the panel has finished its scan (or the timeout), so tests don't
+// depend on how fast a loaded machine runs the scan's timers.
+async function settled(doc,ms=1000){ for(let t=0;t<ms;t+=10){ const c=doc.querySelector('.sns-card'); if(doc.getElementById('sns-launcher')||(c&&c.getAttribute('aria-busy')==='false')) break; await tick(10);} await tick(5); }
 const reviewing=(items)=>({ok:true,run:{status:'reviewing',items:reconcile(items,[])}});
 
 test('while scanning the panel shows a loading state, never "No subscriptions found"', async()=>{
@@ -352,7 +358,7 @@ test('rows are reused across filters, echoes and toggles (thumbnails never reloa
   if(m.type==='sns:scanComplete'){ const r=reviewing(m.items); current=r.run; return r; }
   return m.type==='sns:getState'?{status:'idle'}:{ok:true};
  });
- await tick(30);
+ await settled(doc);
  const rows=[...doc.querySelectorAll('.sns-item')], imgs=rows.map(r=>r.querySelector('img,.sns-item__thumb--placeholder'));
  doc.querySelector('.sns-filter[data-filter="cancel"]').click();
  assert.equal(doc.querySelectorAll('.sns-item').length,0);
@@ -369,7 +375,7 @@ test('rapid toggles are written once, and an older echo does not undo newer clic
   if(m.type==='sns:scanComplete'){ const r=reviewing(m.items); current=r.run; return r; }
   return m.type==='sns:getState'?{status:'idle'}:{ok:true};
  });
- await tick(30);
+ await settled(doc);
  const rows=()=>[...doc.querySelectorAll('.sns-item')];
  rows()[0].click(); rows()[1].click(); rows()[2].click();
  assert.equal(doc.getElementById('sns-stat-cancel').textContent,'3');
@@ -389,7 +395,7 @@ test('starting a run flushes pending choices first and shows a busy confirm butt
   if(m.type==='sns:startRun'){ finishStart=()=>reply({ok:true}); return undefined; }
   return m.type==='sns:getState'?{status:'idle'}:{ok:true};
  });
- await tick(30);
+ await settled(doc);
  doc.querySelector('.sns-item').click();
  doc.getElementById('sns-preview').click();
  doc.getElementById('sns-confirm-run').click();
@@ -475,4 +481,175 @@ test('popup renders once after reading state, and offers retry when the backgrou
  assert.equal(d.getElementById('btn-retry').hidden,true);
  assert.equal(d.getElementById('stat-active').textContent,'1');
  dom.window.close();
+});
+
+// ---------- v2.1.2: launcher, explainer, finish summary, flicker ----------
+const css=fs.readFileSync('ui/panel.css','utf8');
+const rule=sel=>{ const m=css.match(new RegExp('(^|\\n)'+sel.replace(/[.#]/g,'\\$&')+'\\s*\\{([^}]*)\\}')); return m?m[2]:''; };
+function uiStore(initial){ const store={sns_ui:initial}; return {store,local:{get:async k=>({[k]:structuredClone(store[k])}),set:async p=>Object.assign(store,structuredClone(p))}}; }
+function managerWith(local, handler){
+ const dom=page(`<div id="subscriptionsDesktopGridLayout">${tile('SNST0_A','First')}${tile('SNST0_B','Second')}${tile('SNST0_C','Third')}</div>`);
+ dom.window.scrollTo=()=>{}; dom.window.SNSUtils.sleep=async()=>{};
+ const sent=[]; let changed;
+ dom.window.chrome={runtime:{sendMessage:(m,reply)=>{sent.push(m); const r=handler(m); if(r!==undefined) setTimeout(()=>reply(r),0);}},storage:{local,onChanged:{addListener:fn=>changed=fn}}};
+ dom.window.eval(fs.readFileSync('content_manager.js','utf8'));
+ return {dom,doc:dom.window.document,sent,fire:v=>changed({sns_run:{newValue:v}},'local'),fireUi:v=>changed({sns_ui:{newValue:v}},'local')};
+}
+const idleHandler=m=>m.type==='sns:scanComplete'?reviewing(m.items):(m.type==='sns:getState'?{status:'idle'}:{ok:true});
+
+test('the panel starts as a small launcher, opens on click, and remembers that it was open', async()=>{
+ const {store,local}=uiStore(undefined);
+ let {dom,doc}=managerWith(local,idleHandler);
+ await settled(doc);
+ assert.equal(doc.querySelector('.sns-card'),null,'no panel over the page by default');
+ const launcher=doc.getElementById('sns-launcher');
+ assert.ok(launcher); assert.equal(launcher.tagName,'BUTTON'); assert.equal(launcher.getAttribute('aria-expanded'),'false');
+ assert.match(launcher.textContent,/3 subscriptions · Review/);
+ launcher.click(); await tick(5);
+ assert.ok(doc.querySelector('.sns-card'),'opens the panel');
+ assert.equal(doc.activeElement,doc.getElementById('sns-panel-title'),'focus moves into the panel');
+ assert.equal(store.sns_ui.panelOpen,true,'open state is saved');
+ dom.window.close();
+ ({dom,doc}=managerWith(local,idleHandler)); await settled(doc);
+ assert.ok(doc.querySelector('.sns-card'),'reopens open on the next visit');
+ doc.getElementById('sns-minimize').click(); await tick(5);
+ assert.equal(doc.querySelector('.sns-card'),null); assert.ok(doc.getElementById('sns-launcher'));
+ assert.equal(doc.activeElement,doc.getElementById('sns-launcher'),'focus returns to the launcher');
+ assert.equal(store.sns_ui.panelOpen,false,'closed state is saved');
+ dom.window.close();
+});
+test('launcher cannot be squashed: it positions itself against the viewport and never wraps', ()=>{
+ const launcher=rule('.sns-launcher');
+ assert.match(launcher,/position:\s*fixed/); assert.match(launcher,/white-space:\s*nowrap/);
+ assert.doesNotMatch(rule('#sns-root'),/inset:\s*0 0 0 auto/,'no zero-width sidebar anchor');
+ assert.doesNotMatch(css,/\.sns-pill\b/,'old pill styles are gone');
+});
+test('"How it works" shows on first open, "Got it" dismisses it for good, and "?" reopens it', async()=>{
+ const {store,local}=uiStore({panelOpen:true});
+ let {dom,doc}=managerWith(local,idleHandler); await settled(doc);
+ const how=doc.getElementById('sns-how');
+ assert.equal(how.hidden,false,'shown the first time');
+ assert.equal(how.querySelectorAll('li').length,3);
+ assert.match(how.textContent,/Pick what to keep[\s\S]*Review and confirm[\s\S]*one at a time[\s\S]*pause anytime/);
+ const help=doc.getElementById('sns-help');
+ assert.equal(help.getAttribute('aria-label'),'How it works'); assert.equal(help.getAttribute('aria-expanded'),'true');
+ doc.getElementById('sns-how-done').click(); await tick(5);
+ assert.equal(how.hidden,true); assert.equal(store.sns_ui.howSeen,true); assert.equal(help.getAttribute('aria-expanded'),'false');
+ help.click(); assert.equal(how.hidden,false,'"?" reopens it');
+ help.click(); assert.equal(how.hidden,true);
+ dom.window.close();
+ ({dom,doc}=managerWith(local,idleHandler)); await settled(doc);
+ assert.equal(doc.getElementById('sns-how').hidden,true,'not shown again after Got it');
+ dom.window.close();
+});
+test('rows say Keep or Cancel in words, and the confirm step states exactly what will happen', async()=>{
+ const {local}=uiStore({panelOpen:true,howSeen:true});
+ const {dom,doc}=managerWith(local,m=>m.type==='sns:getOptions'?{jitterMs:[2000,5000]}:idleHandler(m)); await settled(doc);
+ const rows=[...doc.querySelectorAll('.sns-item')];
+ const visibleChoice=r=>r.classList.contains('sns-item--kept')?'Keep':'Cancel';
+ assert.deepEqual(rows.map(visibleChoice),['Keep','Keep','Keep'],'everything starts as Keep');
+ rows[0].click(); rows[1].click();
+ assert.equal(rows[0].getAttribute('aria-pressed'),'true');
+ assert.equal(doc.getElementById('sns-preview').textContent,'Review & cancel 2');
+ doc.getElementById('sns-preview').click(); await tick(5);
+ assert.equal(doc.getElementById('sns-modal-title').textContent,'Cancel 2 subscriptions, keep 1.');
+ assert.match(doc.getElementById('sns-modal-lede').textContent,/You can pause anytime/);
+ assert.equal(doc.querySelectorAll('.sns-modal__list:not(.sns-modal__list--keep) li').length,2);
+ assert.equal(doc.querySelectorAll('.sns-modal__list--keep li').length,1);
+ assert.match(doc.getElementById('sns-pace').textContent,/2–5 second/);
+ assert.equal(doc.querySelector('.sns-modal').getAttribute('aria-modal'),'true');
+ doc.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+ assert.equal(doc.getElementById('sns-modal'),null,'Escape closes it');
+ assert.equal(doc.activeElement,doc.getElementById('sns-preview'),'focus returns to the button that opened it');
+ dom.window.close();
+});
+test('while a finish summary is showing the review panel stays out of the way, then comes back after Done', async()=>{
+ const {local}=uiStore({panelOpen:true,howSeen:true});
+ const done={status:'done',items:[{...modern('SNST0_A'),keep:false,status:'done'},{...modern('SNST0_B'),keep:true,status:'pending'}]};
+ let status='done';
+ const {dom,doc,sent,fire}=managerWith(local,m=>m.type==='sns:getState'?(status==='done'?done:{status:'idle'}):idleHandler(m));
+ await settled(doc);
+ assert.equal(doc.getElementById('sns-root').children.length,0,'nothing covers the finish summary');
+ assert.equal(sent.some(m=>m.type==='sns:scanComplete'),false,'the summary is not replaced by a rescan');
+ // The run finishing in place on the last item's page behaves the same.
+ fire({...done,status:'running'}); fire(done);
+ assert.equal(doc.getElementById('sns-root').children.length,0);
+ status='reviewing'; fire({...done,status:'reviewing'}); // Done pressed
+ await settled(doc);
+ assert.ok(sent.some(m=>m.type==='sns:scanComplete'),'rescans what is left on the page');
+ assert.ok(doc.querySelector('.sns-card'),'panel returns as the user left it');
+ dom.window.close();
+});
+function progressPage(run,{storageRun=run,reply=true}={}){
+ const dom=page(''); const sent=[];
+ dom.window.chrome={runtime:{sendMessage:(m,cb)=>{sent.push(m.type); if(reply) cb(m.type==='sns:getState'?run:{ok:true});}},
+  storage:{local:{get:async()=>({sns_run:storageRun})},onChanged:{addListener:()=>{}}}};
+ dom.window.eval(fs.readFileSync('content_progress.js','utf8'));
+ return {dom,doc:dom.window.document,sent};
+}
+test('the progress card is restored at once from saved state on every page load, without an entrance animation', async()=>{
+ const run={status:'running',runId:'r',currentIndex:1,startedAt:Date.now()-20000,jitterMs:[2000,5000],items:[{...modern('a','First'),keep:false,status:'done'},{...modern('b','Second'),keep:false,status:'inflight'},{...modern('c','Third'),keep:false,status:'pending'},{...modern('d','Kept one'),keep:true,status:'pending'}]};
+ const {dom,doc}=progressPage(run,{reply:false}); // the background has not answered yet
+ await tick(5);
+ const panel=doc.querySelector('.sns-progress');
+ assert.ok(panel,'drawn from chrome.storage.local within a few ms, not after a 400 ms delay');
+ assert.ok(panel.classList.contains('sns-progress--restored'));
+ assert.doesNotMatch(rule('.sns-progress'),/animation/,'no fade/slide-in to replay on each item');
+ assert.match(doc.querySelector('.sns-progress__count').textContent,/^2 of 3$/);
+ assert.match(doc.querySelector('.sns-progress__title').textContent,/Second/);
+ assert.match(doc.querySelector('.sns-progress__meta').textContent,/About 40 sec left · 1 cancelled · 1 kept/);
+ assert.match(panel.textContent,/pause anytime/);
+ dom.window.close();
+});
+test('manifest injects the progress card at document_start without changing matches or permissions', ()=>{
+ const m=JSON.parse(fs.readFileSync('manifest.json','utf8'));
+ assert.equal(m.version,'2.1.2');
+ assert.deepEqual(m.permissions,['storage','notifications']); assert.deepEqual(m.host_permissions,['https://www.amazon.com/*']);
+ const entry=m.content_scripts.find(e=>e.js.includes('content_progress.js'));
+ assert.equal(entry.run_at,'document_start');
+ assert.equal(m.content_scripts.filter(e=>e.js.includes('content_progress.js')).length,1);
+ const allMatches=new Set(m.content_scripts.flatMap(e=>e.matches));
+ assert.deepEqual([...allMatches].sort(),['https://www.amazon.com/auto-deliveries*','https://www.amazon.com/auto-deliveries/subscriptionList*','https://www.amazon.com/gp/subscribe-and-save/*','https://www.amazon.com/gp/subscribe-and-save/manager/viewsubscriptions*']);
+ assert.deepEqual(entry.matches,m.content_scripts.find(e=>e.js.includes('content_cancel.js')).matches,'same pages as before');
+});
+test('the finish summary lists what was cancelled, kept and failed, and links to Amazon to double-check', async()=>{
+ const run={status:'done',runId:'r',currentIndex:2,items:[{...modern('a','Paper towels'),keep:false,status:'done'},{...modern('b','Coffee'),keep:true,status:'pending'},{...modern('c','Dish soap'),keep:false,status:'failed',error:'No confirmation shown'}]};
+ const {dom,doc,sent}=progressPage(run);
+ await tick(10);
+ const panel=doc.querySelector('.sns-progress');
+ assert.match(doc.querySelector('.sns-progress__title').textContent,/1 cancelled, 1 kept, 1 failed/);
+ const sections=[...panel.querySelectorAll('details.sns-sum')].map(d=>d.querySelector('summary').textContent);
+ assert.deepEqual(sections,['Needs attention (1)','Cancelled (1)','Kept (1)']);
+ assert.match(panel.textContent,/Dish soap[\s\S]*No confirmation shown/);
+ assert.ok(panel.querySelector('details.sns-sum').open,'problems are shown first, expanded');
+ const link=doc.getElementById('sns-check-amazon');
+ assert.equal(link.getAttribute('href'),'https://www.amazon.com/auto-deliveries/subscriptionList');
+ assert.equal(link.getAttribute('target'),'_blank'); assert.match(link.getAttribute('rel'),/noopener/);
+ doc.getElementById('sns-dismiss').click(); await tick(5);
+ assert.ok(sent.includes('sns:reset'),'Done clears the summary');
+ dom.window.close();
+});
+test('time left reads naturally', ()=>{
+ const dom=page(''); dom.window.chrome={runtime:{sendMessage:()=>{}},storage:{onChanged:{addListener:()=>{}}}};
+ dom.window.eval(fs.readFileSync('content_progress.js','utf8'));
+ const {timeLeftText}=dom.window.SNSProgress; const now=1e12;
+ const s=(done,total)=>({cancelled:done,failed:0,skipped:0,totalToProcess:total});
+ assert.equal(timeLeftText({startedAt:now-5000},s(1,2),now),'A few seconds left');
+ assert.equal(timeLeftText({startedAt:now-30000},s(1,3),now),'About 1 min left');
+ assert.equal(timeLeftText({startedAt:now-10000},s(1,4),now),'About 30 sec left');
+ assert.equal(timeLeftText({startedAt:now-600000},s(5,10),now),'About 10 min left');
+ assert.equal(timeLeftText({jitterMs:[2000,5000]},s(0,2),now),'About 15 sec left','estimate before the first item finishes');
+ assert.equal(timeLeftText({startedAt:now},s(3,3),now),'');
+ dom.window.close();
+});
+test('popup and options use plain labels and show the new version', async()=>{
+ const popup=fs.readFileSync('popup.html','utf8');
+ assert.match(popup,/How it works/); assert.match(popup,/v2\.1\.2/);
+ const dom=new JSDOM(popup.replace(/<script[^>]*><\/script>/g,''),{runScripts:'outside-only'});
+ dom.window.chrome={runtime:{sendMessage:(m,reply)=>reply(m.type==='sns:getState'?{status:'done',items:[{...modern('a'),keep:false,status:'done'},{...modern('b'),keep:true,status:'pending'}]}:[])},storage:{onChanged:{addListener:()=>{}}},tabs:{}};
+ dom.window.eval(fs.readFileSync('popup.js','utf8')); await tick(10);
+ assert.equal(dom.window.document.getElementById('status-text').textContent,'Last run: 1 cancelled, 1 kept');
+ dom.window.close();
+ const options=fs.readFileSync('options.html','utf8');
+ assert.match(options,/<label class="field-heading" for="reason">/); assert.match(options,/v2\.1\.2/);
 });

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Subscription Bulk Canceller",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "description": "See your Amazon Subscribe & Save subscriptions in one list and cancel the ones you pick. Runs locally. Not affiliated with Amazon.",
   "icons": {
     "16": "icons/16.png",
@@ -54,13 +54,22 @@
       "js": [
         "utils.js",
         "selectors.js",
-        "content_cancel.js",
-        "content_progress.js"
+        "content_cancel.js"
       ],
       "css": [
         "ui/panel.css"
       ],
       "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.amazon.com/auto-deliveries*",
+        "https://www.amazon.com/gp/subscribe-and-save/*"
+      ],
+      "js": [
+        "content_progress.js"
+      ],
+      "run_at": "document_start"
     }
   ],
   "options_ui": {

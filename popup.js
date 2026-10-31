@@ -1,6 +1,7 @@
 // Toolbar popup logic — shows current run status, top-line stats, and any failed items.
 
 const SUBS_URL = 'https://www.amazon.com/auto-deliveries/subscriptionList';
+let howTouched = false; // the user opened or closed "How it works" themselves
 
 // Resolves undefined (never throws) if the background can't be reached.
 function msg(type, payload) {
@@ -50,17 +51,19 @@ function render(run) {
   const items = run?.items || [];
   const s = summarize(items);
 
+  const toProcess = items.length - s.kept;
+  const finished = s.cancelled + s.failed + s.skipped;
   const statusLabels = {
-    idle: 'Idle — open your subscriptions page to scan',
+    idle: 'Open your Subscribe & Save page to get started.',
     reviewing: items.length
       ? `${items.length} subscription${items.length === 1 ? '' : 's'} ready to review`
-      : 'No subscriptions detected',
+      : 'No subscriptions found yet. Open your Subscribe & Save page.',
     previewing: 'Reviewing items to cancel',
-    running: `Cancelling — ${s.cancelled + s.failed + s.skipped}/${items.length - s.kept} done`,
-    paused: `Paused — ${s.cancelled + s.failed + s.skipped}/${items.length - s.kept} done`,
+    running: `Cancelling ${Math.min(finished + 1, toProcess)} of ${toProcess}…`,
+    paused: `Paused after ${finished} of ${toProcess}. Resume from the page.`,
     done: items.length
-      ? `Last run: ${s.cancelled} cancelled${s.failed ? `, ${s.failed} failed` : ''}`
-      : 'Idle',
+      ? `Last run: ${s.cancelled} cancelled${s.kept ? `, ${s.kept} kept` : ''}${s.failed ? `, ${s.failed} failed` : ''}`
+      : 'Open your Subscribe & Save page to get started.',
   };
 
   document.getElementById('status-dot').className = `status-dot ${status}`;
@@ -81,15 +84,13 @@ function render(run) {
 
   // Open button morphs by context
   const openBtn = document.getElementById('btn-open');
-  if (status === 'running' || status === 'paused') {
-    openBtn.textContent = 'View live progress';
-  } else if (status === 'reviewing' && items.length) {
-    openBtn.textContent = 'Back to review panel';
-  } else if (status === 'done') {
-    openBtn.textContent = 'Open subscriptions page';
-  } else {
-    openBtn.textContent = 'Open subscriptions page';
-  }
+  if (status === 'running' || status === 'paused') openBtn.textContent = 'Show progress';
+  else if (status === 'reviewing' && items.length) openBtn.textContent = 'Back to my list';
+  else openBtn.textContent = 'Open my Subscribe & Save page';
+
+  // "How it works" starts open until the user has a list to work with.
+  const how = document.getElementById('how');
+  if (how && !howTouched) how.open = !(items.length && status !== 'idle');
 
   // Rescan button only after a run
   const rescanBtn = document.getElementById('btn-rescan');
@@ -138,6 +139,7 @@ async function loadState() {
 
 async function init() {
   document.getElementById('btn-retry').addEventListener('click', loadState);
+  document.querySelector('#how summary')?.addEventListener('click', () => { howTouched = true; });
   await loadState();
 
   document.getElementById('btn-open').addEventListener('click', async () => {
@@ -168,8 +170,8 @@ async function init() {
       const data = JSON.parse(document.getElementById('import-data').value);
       const result = await msg('sns:import', { data });
       document.getElementById('import-result').textContent = result?.ok
-        ? `${result.count} saved choices restored. Rescan to apply them.` : result?.error || 'Restore failed.';
-    } catch (_) { document.getElementById('import-result').textContent = 'Paste valid saved choices JSON.'; }
+        ? `${result.count} choices restored. Rescan the page to see them.` : result?.error || 'Restore failed.';
+    } catch (_) { document.getElementById('import-result').textContent = 'That doesn’t look like a backup file. Paste the whole file.'; }
   });
 
   document.getElementById('btn-export').addEventListener('click', async () => {
@@ -197,7 +199,7 @@ function renderSaved(items) {
   const identified = (Array.isArray(items) ? items : []).filter(item => item.subscriptionId);
   const confirmed = identified.filter(item => item.status === 'done').length;
   const pending = identified.filter(item => !item.keep && item.status !== 'done').length;
-  setText('saved-status', `Saved history: ${confirmed} cancelled · ${pending} remaining to check or cancel.`);
+  setText('saved-status', identified.length ? `Saved in this browser: ${confirmed} cancelled so far, ${pending} still selected to cancel.` : '');
 }
 
 init();

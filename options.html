@@ -11,10 +11,10 @@
       --border-strong: #cdd2d8;
       --text: #191c20;
       --text-2: #5a626c;
-      --text-3: #8b929c;
-      --red: #d64533;
-      --red-deep: #b93424;
-      --green: #1e7d47;
+      --text-3: #66707b;
+      --red: #c4382a;
+      --red-deep: #a32c20;
+      --green: #1b7342;
       --focus: #2563eb;
       --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
     }
@@ -95,6 +95,7 @@
 
     .field-body { min-width: 0; }
     .field-heading {
+      display: block;
       font-size: 15px;
       font-weight: 600;
       line-height: 1.3;
@@ -221,38 +222,38 @@
   <div class="page">
     <header class="masthead">
       <div class="eyebrow">Subscription Bulk Canceller — Settings</div>
-      <h1>Cancellation defaults</h1>
+      <h1>Settings</h1>
       <p class="subtitle">
-        Two settings shape every cancellation run. Set them once — you can still override the reason per run from the review panel.
+        Two settings apply to every run. You can still pick a different reason in the confirm step before each run.
       </p>
     </header>
 
     <section class="field">
       <div class="field-label">Reason</div>
       <div class="field-body">
-        <div class="field-heading">Default cancellation reason</div>
-        <p class="field-hint">
-          Amazon asks <em>why</em> on every cancellation. Pick the answer you'd otherwise type five times in a row.
+        <label class="field-heading" for="reason">Reason given to Amazon</label>
+        <p class="field-hint" id="reason-hint">
+          Amazon asks <em>why</em> for every cancellation. The extension answers with this reason, so you don't have to pick it for each item.
         </p>
-        <select class="select" id="reason" aria-label="Default cancellation reason"></select>
+        <select class="select" id="reason" aria-describedby="reason-hint"></select>
       </div>
     </section>
 
     <section class="field">
       <div class="field-label">Pacing</div>
       <div class="field-body">
-        <div class="field-heading">Pause between each item</div>
-        <p class="field-hint">
-          The extension waits a short random interval between cancellations so each page has time to load. <em>2,000–5,000 ms</em> is a comfortable range. Lower is faster; higher is more reliable on slow connections.
+        <div class="field-heading" id="pace-heading">Pause between items</div>
+        <p class="field-hint" id="pace-hint">
+          After each cancellation the extension waits a random time in this range, so every Amazon page has time to load. The default, <em>2,000–5,000 ms</em> (2 to 5 seconds), works well. Shorter is faster; longer is more reliable on slow connections. 1,000 ms = 1 second.
         </p>
         <div class="row">
-          <input class="input" type="number" id="jitter-min" min="500" max="60000" step="100" aria-label="Minimum pause in milliseconds" />
-          <span class="dash">—</span>
-          <input class="input" type="number" id="jitter-max" min="500" max="60000" step="100" aria-label="Maximum pause in milliseconds" />
+          <input class="input" type="number" id="jitter-min" min="500" max="60000" step="100" aria-label="Shortest pause, in milliseconds" aria-describedby="pace-hint" />
+          <span class="dash" aria-hidden="true">—</span>
+          <input class="input" type="number" id="jitter-max" min="500" max="60000" step="100" aria-label="Longest pause, in milliseconds" aria-describedby="pace-hint" />
         </div>
-        <div class="row-cap">
-          <span class="a">Minimum · ms</span>
-          <span class="b">Maximum · ms</span>
+        <div class="row-cap" aria-hidden="true">
+          <span class="a">Shortest · ms</span>
+          <span class="b">Longest · ms</span>
         </div>
       </div>
     </section>
@@ -266,7 +267,7 @@
 
   <div class="colophon">
     <span>Subscription Bulk Canceller</span>
-    <span>v2.1.1</span>
+    <span>v2.1.2 · settings stay in this browser</span>
   </div>
 
   <script src="state.js"></script>
